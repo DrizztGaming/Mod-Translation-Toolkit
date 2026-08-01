@@ -62,3 +62,9 @@ Planned profile architecture:
 ## License
 
 MIT. See `LICENSE`.
+
+## Support
+
+If you find Mod Translation Toolkit useful and want to support its development:
+
+[![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](http://ko-fi.com/drizztgaming)
