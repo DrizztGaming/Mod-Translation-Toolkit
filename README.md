@@ -2,12 +2,32 @@
 
 A Windows desktop helper for translating game mods.
 
-> **Current release:** v0.1.8  
+> **Current release:** v0.2.8  
 > **Currently supported game:** RimWorld
 
 The project started as a small RimWorld translation helper and is being prepared as a multi-game toolkit with separate game profiles.
 
 ## Features
+
+- Existing translation editing can resolve the original mod through `modDependencies`, `loadAfter/loadBefore`, common translation packageId suffixes, or the cleaned base mod name.
+
+- Existing translation mods can be reopened from Installed Mods. The Toolkit resolves the original dependency, loads source strings from the original mod, overlays the existing translation, and saves changes back into the same translation mod without deleting Workshop metadata.
+
+- Source/original strings are selectable and copyable directly from the translation table.
+
+- Existing localization for the selected target language is loaded automatically into the translation table.
+- Automatic translation only processes entries that are still missing, preserving detected human/localized text.
+- Switching the target language automatically loads the detected localization for that language when available.
+
+- Detects existing Polish and English localization in both root and versioned language folders.
+- Shows translation coverage against the currently scanned source entries.
+- Classifies existing localization as missing, partial or complete.
+- Existing Polish or English localization can be loaded directly into the translation table for editing or completion.
+
+- Version-aware localization scanning: detects `Languages/English` both at mod root and inside version folders such as `1.6/Languages/English`.
+- Follows `LoadFolders.xml` when locating active language folders.
+- Reads both `Keyed` and existing `DefInjected` localization files instead of relying only on rebuilding DefInjected from `Defs`.
+- Existing English `DefInjected` entries take priority over fallback extraction from `Defs`.
 
 - Automatically generates a ready-to-paste Steam Workshop description in BBCode.
 - Workshop description includes Requirements, Original Mod, Credits, Mod Translation Toolkit attribution, GitHub link and Ko-fi support section.

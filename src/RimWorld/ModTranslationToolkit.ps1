@@ -7,7 +7,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-$AppVersion = "0.1.8"
+$AppVersion = "0.2.8"
 $script:UiLanguage = "pl"
 $script:Entries = New-Object System.Collections.ArrayList
 $script:Mods = New-Object System.Collections.ArrayList
@@ -21,6 +21,11 @@ $script:OriginalWorkshopUrl = ""
 $script:OriginalDownloadUrl = ""
 $script:OriginalAuthor = ""
 $script:LastWorkshopDescriptionPath = ""
+$script:LanguageCoverage = @{}
+$script:ExistingTranslations = @{}
+$script:EditingTranslationModPath = ""
+$script:EditingTranslationPackageId = ""
+$script:EditingTranslationName = ""
 $script:SelectedContentVersion = ""
 $script:EntryKeys = @{}
 
@@ -180,24 +185,318 @@ function Add-Entry([string]$kind, [string]$relativeFile, [string]$key, [string]$
     })
 }
 
-function Scan-EnglishLanguages([string]$modPath) {
-    $english = Join-Path $modPath "Languages\English"
-    if (-not (Test-Path $english)) { return 0 }
+function Get-LanguageRoots([string]$modPath) {
+    $roots = New-Object System.Collections.ArrayList
+    $seen = @{}
 
-    $count = 0
-    Get-ChildItem -LiteralPath $english -Recurse -Filter *.xml -File | ForEach-Object {
-        $file = $_
-        $rel = $file.FullName.Substring($english.Length).TrimStart('\','/')
+    function Add-LanguageRoot([string]$p) {
+        if ([string]::IsNullOrWhiteSpace($p)) { return }
+        if (-not [System.IO.Path]::IsPathRooted($p)) { $p = Join-Path $modPath $p }
+        if (-not (Test-Path $p)) { return }
+
         try {
-            [xml]$doc = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8
-            foreach ($child in $doc.DocumentElement.ChildNodes) {
-                if ($child.NodeType -ne [System.Xml.XmlNodeType]::Element) { continue }
-                Add-Entry "Language" $rel $child.Name (Get-TextContent $child)
-                $count++
+            $norm = [System.IO.Path]::GetFullPath($p).TrimEnd('\','/').ToLowerInvariant()
+        } catch {
+            $norm = $p.TrimEnd('\','/').ToLowerInvariant()
+        }
+
+        if (-not $seen.ContainsKey($norm)) {
+            $seen[$norm] = $true
+            [void]$roots.Add($p)
+        }
+    }
+
+    # Classic root localization.
+    Add-LanguageRoot (Join-Path $modPath "Languages\English")
+
+    $preferred = Get-PreferredContentVersion $modPath
+    if ($preferred) {
+        Add-LanguageRoot (Join-Path (Join-Path $modPath $preferred) "Languages\English")
+    }
+
+    # Follow LoadFolders.xml for the selected RimWorld version.
+    $loadFolders = Join-Path $modPath "LoadFolders.xml"
+    if (Test-Path $loadFolders) {
+        try {
+            [xml]$lf = Get-Content -LiteralPath $loadFolders -Raw -Encoding UTF8
+            $section = $null
+
+            if ($preferred) {
+                $section = $lf.loadFolders.SelectSingleNode("v$preferred")
+            }
+
+            if ($null -eq $section) {
+                $sections = @($lf.loadFolders.ChildNodes | Where-Object {
+                    $_.NodeType -eq [System.Xml.XmlNodeType]::Element -and $_.Name -match '^v[0-9]+\.[0-9]+$'
+                })
+
+                $section = $sections | Sort-Object {
+                    $v = $_.Name.Substring(1)
+                    $t = Get-VersionTuple $v
+                    ($t[0] * 1000) + $t[1]
+                } -Descending | Select-Object -First 1
+            }
+
+            if ($null -ne $section) {
+                foreach ($li in $section.SelectNodes("li")) {
+                    $rel = $li.InnerText.Trim()
+
+                    if (-not $rel -or $rel -eq "/") {
+                        Add-LanguageRoot (Join-Path $modPath "Languages\English")
+                        continue
+                    }
+
+                    $base = Join-Path $modPath $rel
+                    Add-LanguageRoot (Join-Path $base "Languages\English")
+                }
             }
         } catch {}
     }
-    return $count
+
+    return @($roots)
+}
+
+
+function Get-LanguageFolderName([string]$code) {
+    switch ($code) {
+        "pl" { return "Polish" }
+        "en" { return "English" }
+        default { return $code }
+    }
+}
+
+function Get-LanguageRootsForCode([string]$modPath, [string]$code) {
+    $folderName = Get-LanguageFolderName $code
+    $roots = New-Object System.Collections.ArrayList
+    $seen = @{}
+
+    function Add-Root([string]$p) {
+        if ([string]::IsNullOrWhiteSpace($p)) { return }
+        if (-not [System.IO.Path]::IsPathRooted($p)) { $p = Join-Path $modPath $p }
+        if (-not (Test-Path $p)) { return }
+
+        try {
+            $norm = [System.IO.Path]::GetFullPath($p).TrimEnd('\','/').ToLowerInvariant()
+        } catch {
+            $norm = $p.TrimEnd('\','/').ToLowerInvariant()
+        }
+
+        if (-not $seen.ContainsKey($norm)) {
+            $seen[$norm] = $true
+            [void]$roots.Add($p)
+        }
+    }
+
+    Add-Root (Join-Path $modPath "Languages\$folderName")
+
+    $preferred = Get-PreferredContentVersion $modPath
+    if ($preferred) {
+        Add-Root (Join-Path (Join-Path $modPath $preferred) "Languages\$folderName")
+    }
+
+    $loadFolders = Join-Path $modPath "LoadFolders.xml"
+    if (Test-Path $loadFolders) {
+        try {
+            [xml]$lf = Get-Content -LiteralPath $loadFolders -Raw -Encoding UTF8
+            $section = $null
+
+            if ($preferred) {
+                $section = $lf.loadFolders.SelectSingleNode("v$preferred")
+            }
+
+            if ($null -eq $section) {
+                $sections = @($lf.loadFolders.ChildNodes | Where-Object {
+                    $_.NodeType -eq [System.Xml.XmlNodeType]::Element -and $_.Name -match '^v[0-9]+\.[0-9]+$'
+                })
+
+                $section = $sections | Sort-Object {
+                    $v = $_.Name.Substring(1)
+                    $t = Get-VersionTuple $v
+                    ($t[0] * 1000) + $t[1]
+                } -Descending | Select-Object -First 1
+            }
+
+            if ($null -ne $section) {
+                foreach ($li in $section.SelectNodes("li")) {
+                    $rel = $li.InnerText.Trim()
+
+                    if (-not $rel -or $rel -eq "/") {
+                        Add-Root (Join-Path $modPath "Languages\$folderName")
+                        continue
+                    }
+
+                    $base = Join-Path $modPath $rel
+                    Add-Root (Join-Path $base "Languages\$folderName")
+                }
+            }
+        } catch {}
+    }
+
+    return @($roots)
+}
+
+function Read-LanguageEntries([string]$modPath, [string]$code) {
+    $entries = @{}
+    $roots = @(Get-LanguageRootsForCode $modPath $code)
+
+    foreach ($langRoot in $roots) {
+        if (-not (Test-Path $langRoot)) { continue }
+
+        Get-ChildItem -LiteralPath $langRoot -Recurse -Filter *.xml -File -ErrorAction SilentlyContinue | ForEach-Object {
+            $file = $_
+            try {
+                [xml]$doc = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8
+                if ($null -eq $doc.DocumentElement -or $doc.DocumentElement.Name -ne "LanguageData") { return }
+
+                $rel = $file.FullName.Substring($langRoot.Length).TrimStart('\','/')
+                foreach ($child in $doc.DocumentElement.ChildNodes) {
+                    if ($child.NodeType -ne [System.Xml.XmlNodeType]::Element) { continue }
+                    $id = "$rel|$($child.Name)".ToLowerInvariant()
+                    if (-not $entries.ContainsKey($id)) {
+                        $entries[$id] = [pscustomobject]@{
+                            File = $rel
+                            Key = $child.Name
+                            Text = (Get-TextContent $child)
+                        }
+                    }
+                }
+            } catch {}
+        }
+    }
+
+    return $entries
+}
+
+function Update-LanguageCoverage([string]$modPath) {
+    $script:LanguageCoverage = @{}
+    $script:ExistingTranslations = @{}
+
+    $sourceCount = $script:Entries.Count
+    foreach ($code in @("pl","en")) {
+        $entries = Read-LanguageEntries $modPath $code
+        $script:ExistingTranslations[$code] = $entries
+
+        $matched = 0
+        foreach ($e in $script:Entries) {
+            $id = "$($e.File)|$($e.Key)".ToLowerInvariant()
+            if ($entries.ContainsKey($id)) { $matched++ }
+        }
+
+        $percent = if ($sourceCount -gt 0) {
+            [Math]::Round(($matched * 100.0) / $sourceCount, 1)
+        } else { 0 }
+
+        $status = if ($matched -eq 0) {
+            "none"
+        } elseif ($matched -lt $sourceCount) {
+            "partial"
+        } else {
+            "complete"
+        }
+
+        $script:LanguageCoverage[$code] = [pscustomobject]@{
+            Found = $entries.Count
+            Matched = $matched
+            Total = $sourceCount
+            Percent = $percent
+            Status = $status
+        }
+    }
+}
+
+
+function Get-SelectedTargetLanguageCode {
+    try {
+        if ($null -ne $cmbTargetLang -and $null -ne $cmbTargetLang.SelectedItem) {
+            return [string]$cmbTargetLang.SelectedItem.Tag
+        }
+    } catch {}
+    return "pl"
+}
+
+function AutoLoad-ExistingTargetTranslation {
+    $code = Get-SelectedTargetLanguageCode
+
+    if (-not $script:ExistingTranslations.ContainsKey($code)) {
+        return 0
+    }
+
+    $entries = $script:ExistingTranslations[$code]
+    if ($null -eq $entries -or $entries.Count -eq 0) {
+        return 0
+    }
+
+    $loaded = 0
+
+    foreach ($e in $script:Entries) {
+        $id = "$($e.File)|$($e.Key)".ToLowerInvariant()
+
+        if ($entries.ContainsKey($id)) {
+            # Existing localization wins. Do not overwrite it with machine translation.
+            $existingText = [string]$entries[$id].Text
+            if (-not [string]::IsNullOrWhiteSpace($existingText)) {
+                $e.Translation = $existingText
+                $loaded++
+            }
+        }
+    }
+
+    Refresh-Grid
+    return $loaded
+}
+
+function Apply-ExistingTranslation([string]$code) {
+    if (-not $script:ExistingTranslations.ContainsKey($code)) { return 0 }
+
+    $entries = $script:ExistingTranslations[$code]
+    $loaded = 0
+
+    foreach ($e in $script:Entries) {
+        $id = "$($e.File)|$($e.Key)".ToLowerInvariant()
+        if ($entries.ContainsKey($id)) {
+            $e.Translation = [string]$entries[$id].Text
+            $loaded++
+        }
+    }
+
+    Refresh-Grid
+    return $loaded
+}
+
+function Scan-EnglishLanguages([string]$modPath) {
+    $countBefore = $script:Entries.Count
+    $roots = @(Get-LanguageRoots $modPath)
+
+    foreach ($english in $roots) {
+        if (-not (Test-Path $english)) { continue }
+
+        Get-ChildItem -LiteralPath $english -Recurse -Filter *.xml -File -ErrorAction SilentlyContinue | ForEach-Object {
+            $file = $_
+
+            try {
+                [xml]$doc = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8
+                if ($null -eq $doc.DocumentElement) { return }
+
+                $rootName = $doc.DocumentElement.Name
+                if ($rootName -ne "LanguageData") { return }
+
+                $rel = $file.FullName.Substring($english.Length).TrimStart('\','/')
+
+                # Preserve the localization branch:
+                # Keyed\Foo.xml -> Keyed\Foo.xml
+                # DefInjected\ThingDef\ThingDef.xml -> same relative target path
+                $kind = if ($rel -like "DefInjected\*") { "DefInjected" } else { "Language" }
+
+                foreach ($child in $doc.DocumentElement.ChildNodes) {
+                    if ($child.NodeType -ne [System.Xml.XmlNodeType]::Element) { continue }
+
+                    Add-Entry $kind $rel $child.Name (Get-TextContent $child)
+                }
+            } catch {}
+        }
+    }
+
+    return ($script:Entries.Count - $countBefore)
 }
 
 function Get-VersionTuple([string]$v) {
@@ -343,6 +642,365 @@ function Refresh-Grid {
     $lblCount.Content = "Wpisy: $($script:Entries.Count)"
 }
 
+
+function Get-TranslationModInfo([string]$modPath) {
+    $info = [ordered]@{
+        Name = Split-Path $modPath -Leaf
+        PackageId = ""
+        Dependencies = @()
+        LoadAfter = @()
+        LoadBefore = @()
+        IsTranslationMod = $false
+        TargetCode = ""
+        ToolkitGenerated = $false
+    }
+
+    $about = Join-Path $modPath "About\About.xml"
+    if (Test-Path $about) {
+        try {
+            [xml]$x = Get-Content -LiteralPath $about -Raw -Encoding UTF8
+
+            $n = $x.ModMetaData.SelectSingleNode("name")
+            if ($null -ne $n) { $info.Name = $n.InnerText.Trim() }
+
+            $p = $x.ModMetaData.SelectSingleNode("packageId")
+            if ($null -ne $p) { $info.PackageId = $p.InnerText.Trim() }
+
+            $deps = New-Object System.Collections.ArrayList
+            foreach ($d in @($x.ModMetaData.SelectNodes("modDependencies/li"))) {
+                $packageCandidate = $d.SelectSingleNode("packageId")
+                if ($null -ne $packageCandidate -and -not [string]::IsNullOrWhiteSpace($packageCandidate.InnerText)) {
+                    [void]$deps.Add($packageCandidate.InnerText.Trim())
+                }
+            }
+            $info.Dependencies = @($deps)
+
+            $after = New-Object System.Collections.ArrayList
+            foreach ($node in @($x.ModMetaData.SelectNodes("loadAfter/li"))) {
+                if ($null -ne $node -and -not [string]::IsNullOrWhiteSpace($node.InnerText)) {
+                    [void]$after.Add($node.InnerText.Trim())
+                }
+            }
+            $info.LoadAfter = @($after)
+
+            $before = New-Object System.Collections.ArrayList
+            foreach ($node in @($x.ModMetaData.SelectNodes("loadBefore/li"))) {
+                if ($null -ne $node -and -not [string]::IsNullOrWhiteSpace($node.InnerText)) {
+                    [void]$before.Add($node.InnerText.Trim())
+                }
+            }
+            $info.LoadBefore = @($before)
+
+            $desc = $x.ModMetaData.SelectSingleNode("description")
+            if ($null -ne $desc) {
+                $descriptionText = $desc.InnerText
+                if ($descriptionText -match 'Mod Translation Toolkit|github\.com/DrizztGaming/Mod-Translation-Toolkit') {
+                    $info.ToolkitGenerated = $true
+                }
+            }
+        } catch {}
+    }
+
+    # Detect supported translation language from actual language folders.
+    if (@(Get-LanguageRootsForCode $modPath "pl").Count -gt 0) {
+        $info.TargetCode = "pl"
+    } elseif (@(Get-LanguageRootsForCode $modPath "en").Count -gt 0) {
+        $info.TargetCode = "en"
+    }
+    $pidLower = ([string]$info.PackageId).ToLowerInvariant()
+    $nameLower = ([string]$info.Name).ToLowerInvariant()
+
+    # Be deliberately conservative. A normal mod may contain Languages,
+    # modDependencies and loadAfter entries. Those are NOT enough to call it
+    # a translation mod.
+    $explicitTranslationSignal = (
+        $pidLower -match '(^|[._-])(pltranslation|entranslation|polishtranslation|englishtranslation|translation)([._-]|$)' -or
+        $nameLower -match 'translation|tłumaczenie|tlumaczenie'
+    )
+
+    $info.IsTranslationMod = (
+        -not [string]::IsNullOrWhiteSpace($info.TargetCode) -and
+        ($explicitTranslationSignal -or $info.ToolkitGenerated)
+    )
+
+    return [pscustomobject]$info
+}
+
+
+function Get-TranslationClassificationReason($translationInfo, [string]$modPath) {
+    $pidLower = ([string]$translationInfo.PackageId).ToLowerInvariant()
+    $nameLower = ([string]$translationInfo.Name).ToLowerInvariant()
+
+    if ($translationInfo.ToolkitGenerated) {
+        return "toolkit attribution"
+    }
+
+    if ($pidLower -match '(^|[._-])(pltranslation|entranslation|polishtranslation|englishtranslation|translation)([._-]|$)') {
+        return "packageId"
+    }
+
+    if ($nameLower -match 'translation|tłumaczenie|tlumaczenie') {
+        return "name"
+    }
+
+    return "normal mod"
+}
+
+function Find-ModByPackageId([string]$packageId, [string]$excludePath = "") {
+    if ([string]::IsNullOrWhiteSpace($packageId)) { return $null }
+    $needle = $packageId.Trim().ToLowerInvariant()
+
+    foreach ($m in @($script:Mods)) {
+        try {
+            if (-not [string]::IsNullOrWhiteSpace($excludePath)) {
+                $a = (Get-NormalizedPath ([string]$m.Path))
+                $b = (Get-NormalizedPath $excludePath)
+                if ($a -eq $b) { continue }
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace([string]$m.PackageId) -and
+                ([string]$m.PackageId).Trim().ToLowerInvariant() -eq $needle) {
+                return $m
+            }
+        } catch {}
+    }
+
+    return $null
+}
+
+function Select-LanguageComboCode($combo, [string]$code) {
+    foreach ($item in $combo.Items) {
+        if ([string]$item.Tag -eq $code) {
+            $combo.SelectedItem = $item
+            return
+        }
+    }
+}
+
+
+function Normalize-TranslationBaseName([string]$name) {
+    if ([string]::IsNullOrWhiteSpace($name)) { return "" }
+
+    $n = $name.Trim()
+    $patterns = @(
+        '\s*-\s*Polish Translation\s*$',
+        '\s*-\s*English Translation\s*$',
+        '\s*-\s*Polskie Tłumaczenie\s*$',
+        '\s*-\s*Tłumaczenie PL\s*$',
+        '\s*-\s*PL Translation\s*$',
+        '\s*\(Polish Translation\)\s*$',
+        '\s*\[Polish Translation\]\s*$',
+        '\s*Translation\s*$'
+    )
+
+    foreach ($p in $patterns) {
+        $n = [regex]::Replace($n, $p, '', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+    }
+
+    return $n.Trim()
+}
+
+function Get-PackageIdSourceCandidates([string]$packageId) {
+    $result = New-Object System.Collections.ArrayList
+    if ([string]::IsNullOrWhiteSpace($packageId)) { return @($result) }
+
+    $basePackageId = $packageId.Trim()
+
+    $patterns = @(
+        '\.pltranslation$',
+        '\.entranslation$',
+        '\.polishtranslation$',
+        '\.englishtranslation$',
+        '\.translation\.pl$',
+        '\.translation\.en$',
+        '\.translation$',
+        '\.polish$',
+        '\.english$',
+        '\.pl$',
+        '\.en$',
+        '_pl$',
+        '_en$',
+        '-pl$',
+        '-en$'
+    )
+
+    foreach ($p in $patterns) {
+        $candidate = [regex]::Replace($basePackageId, $p, '', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+        if ($candidate -ne $basePackageId -and -not [string]::IsNullOrWhiteSpace($candidate)) {
+            if (-not (@($result) -contains $candidate)) {
+                [void]$result.Add($candidate)
+            }
+        }
+    }
+
+    return @($result)
+}
+
+function Find-ModByNormalizedName([string]$name, [string]$excludePath = "") {
+    $needle = (Normalize-TranslationBaseName $name).ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($needle)) { return $null }
+
+    foreach ($m in @($script:Mods)) {
+        try {
+            if (-not [string]::IsNullOrWhiteSpace($excludePath)) {
+                $a = Get-NormalizedPath ([string]$m.Path)
+                $b = Get-NormalizedPath $excludePath
+                if ($a -eq $b) { continue }
+            }
+
+            $candidate = (Normalize-TranslationBaseName ([string]$m.Name)).ToLowerInvariant()
+            if ($candidate -eq $needle) {
+                return $m
+            }
+        } catch {}
+    }
+
+    return $null
+}
+
+function Test-IsFrameworkDependency([string]$packageId) {
+    if ([string]::IsNullOrWhiteSpace($packageId)) { return $false }
+
+    $p = $packageId.Trim().ToLowerInvariant()
+
+    $frameworkIds = @(
+        "brrainz.harmony",
+        "unlimitedhugs.hugslib",
+        "oskarpotocki.vanillafactionsexpanded.core",
+        "imranfish.xmlextensions"
+    )
+
+    if ($frameworkIds -contains $p) { return $true }
+
+    if ($p -match '(^|\.)(framework|core|library|lib)(\.|$)') { return $true }
+
+    return $false
+}
+
+function Resolve-OriginalModForTranslation($translationInfo, [string]$translationModPath) {
+    # 1. Strongest practical signal: packageId derived from the translation packageId.
+    foreach ($candidatePackageId in @(Get-PackageIdSourceCandidates ([string]$translationInfo.PackageId))) {
+        $m = Find-ModByPackageId $candidatePackageId $translationModPath
+        if ($null -ne $m) {
+            return [pscustomobject]@{
+                Mod = $m
+                Method = "packageId suffix"
+                Value = $candidatePackageId
+            }
+        }
+    }
+
+    # 2. Translation name -> base mod name.
+    $m = Find-ModByNormalizedName ([string]$translationInfo.Name) $translationModPath
+    if ($null -ne $m) {
+        return [pscustomobject]@{
+            Mod = $m
+            Method = "name"
+            Value = $m.Name
+        }
+    }
+
+    # 3. Explicit dependencies, but ignore common framework/runtime dependencies first.
+    foreach ($dependencyPackageId in @($translationInfo.Dependencies)) {
+        if (Test-IsFrameworkDependency $dependencyPackageId) { continue }
+
+        $m = Find-ModByPackageId $dependencyPackageId $translationModPath
+        if ($null -ne $m) {
+            return [pscustomobject]@{
+                Mod = $m
+                Method = "modDependencies"
+                Value = $dependencyPackageId
+            }
+        }
+    }
+
+    # 4. loadAfter/loadBefore, also excluding common frameworks.
+    foreach ($loadAfterPackageId in @($translationInfo.LoadAfter)) {
+        if (Test-IsFrameworkDependency $loadAfterPackageId) { continue }
+
+        $m = Find-ModByPackageId $loadAfterPackageId $translationModPath
+        if ($null -ne $m) {
+            return [pscustomobject]@{
+                Mod = $m
+                Method = "loadAfter"
+                Value = $loadAfterPackageId
+            }
+        }
+    }
+
+    foreach ($loadBeforePackageId in @($translationInfo.LoadBefore)) {
+        if (Test-IsFrameworkDependency $loadBeforePackageId) { continue }
+
+        $m = Find-ModByPackageId $loadBeforePackageId $translationModPath
+        if ($null -ne $m) {
+            return [pscustomobject]@{
+                Mod = $m
+                Method = "loadBefore"
+                Value = $loadBeforePackageId
+            }
+        }
+    }
+
+    # 5. Do not guess from an arbitrary framework dependency.
+    # If we reached this point, returning the wrong source is worse than asking the user.
+    return $null
+}
+
+function Open-ExistingTranslationMod([string]$translationModPath) {
+    $t = Get-TranslationModInfo $translationModPath
+    if (-not $t.IsTranslationMod) {
+        throw "Wybrany mod nie został rozpoznany jako mod tłumaczeniowy."
+    }
+
+    $resolved = Resolve-OriginalModForTranslation $t $translationModPath
+    if ($null -eq $resolved -or $null -eq $resolved.Mod) {
+        $candidateIds = @(Get-PackageIdSourceCandidates ([string]$t.PackageId)
+        ) -join ", "
+        $baseName = Normalize-TranslationBaseName ([string]$t.Name)
+
+        throw "Nie znaleziono moda źródłowego. Toolkit sprawdził modDependencies, loadAfter/loadBefore, packageId oraz nazwę moda. Nazwa bazowa: '$baseName'. Kandydaci packageId: '$candidateIds'."
+    }
+
+    $original = $resolved.Mod
+
+    # Set target before Analyze-Mod so automatic loading uses the intended language.
+    Select-LanguageComboCode $cmbTargetLang $t.TargetCode
+    if ($t.TargetCode -eq "pl") {
+        Select-LanguageComboCode $cmbSourceLang "en"
+    } else {
+        Select-LanguageComboCode $cmbSourceLang "pl"
+    }
+
+    $scan = Analyze-Mod ([string]$original.Path)
+
+    # Overlay translation from the selected translation mod, not from the original mod.
+    $existing = Read-LanguageEntries $translationModPath $t.TargetCode
+    $loaded = 0
+
+    foreach ($e in $script:Entries) {
+        $id = "$($e.File)|$($e.Key)".ToLowerInvariant()
+        if ($existing.ContainsKey($id)) {
+            $e.Translation = [string]$existing[$id].Text
+            $loaded++
+        }
+    }
+
+    $script:EditingTranslationModPath = $translationModPath
+    $script:EditingTranslationPackageId = [string]$t.PackageId
+    $script:EditingTranslationName = [string]$t.Name
+
+    Refresh-Grid
+
+    return [pscustomobject]@{
+        Translation = $t
+        Original = $original
+        Scan = $scan
+        Loaded = $loaded
+        Total = $script:Entries.Count
+        ResolveMethod = $resolved.Method
+    }
+}
+
 function Analyze-Mod([string]$modPath) {
     $script:Entries.Clear()
     $script:EntryKeys = @{}
@@ -361,12 +1019,17 @@ function Analyze-Mod([string]$modPath) {
     $txtModName.Text = $script:OriginalModName
     $txtPackageId.Text = $script:OriginalPackageId
     Refresh-Grid
+    Update-LanguageCoverage $modPath
 
+    $autoLoaded = AutoLoad-ExistingTargetTranslation
     return [pscustomobject]@{
         LanguageEntries = $langCount
         DefEntries = $defsCount
         ContentVersion = $script:SelectedContentVersion
         Total = $script:Entries.Count
+        PolishCoverage = $script:LanguageCoverage["pl"]
+        EnglishCoverage = $script:LanguageCoverage["en"]
+        AutoLoadedExisting = $autoLoaded
     }
 }
 
@@ -389,7 +1052,9 @@ function Import-Csv([string]$path) {
 }
 
 function Write-LanguageFiles([string]$outMod) {
-    $langRoot = Join-Path $outMod "Languages\Polish"
+    $targetCode = Get-SelectedTargetLanguageCode
+    $targetFolder = Get-LanguageFolderName $targetCode
+    $langRoot = Join-Path $outMod "Languages\$targetFolder"
     New-Item -ItemType Directory -Path $langRoot -Force | Out-Null
 
     # Output path already encodes Keyed vs DefInjected. Grouping by File prevents
@@ -692,10 +1357,22 @@ function Build-TranslationMod([string]$parentFolder) {
     }
 
     $safeName = ($script:OriginalModName -replace '[\\/:*?"<>|]', '_')
-    $outMod = Join-Path $parentFolder "$safeName - $($lang.WorkshopSuffix)"
+    $isEditingExisting = -not [string]::IsNullOrWhiteSpace($script:EditingTranslationModPath)
 
-    if (Test-Path $outMod) {
-        Remove-Item -LiteralPath $outMod -Recurse -Force
+    if ($isEditingExisting) {
+        $outMod = $script:EditingTranslationModPath
+
+        # Keep Workshop metadata and any extra files. Only refresh the target language data.
+        $targetFolder = Get-LanguageFolderName (Get-SelectedTargetLanguageCode)
+        $targetLanguageRoot = Join-Path $outMod "Languages\$targetFolder"
+        if (Test-Path $targetLanguageRoot) {
+            Remove-Item -LiteralPath $targetLanguageRoot -Recurse -Force
+        }
+    } else {
+        $outMod = Join-Path $parentFolder "$safeName - $($lang.WorkshopSuffix)"
+        if (Test-Path $outMod) {
+            Remove-Item -LiteralPath $outMod -Recurse -Force
+        }
     }
 
     New-Item -ItemType Directory -Path (Join-Path $outMod "About") -Force | Out-Null
@@ -755,7 +1432,9 @@ $dependencyLinks    </li>
 </ModMetaData>
 "@
 
-    [System.IO.File]::WriteAllText((Join-Path $outMod "About\About.xml"), $aboutText, (New-Object System.Text.UTF8Encoding($false)))
+    if (-not $isEditingExisting -or -not (Test-Path (Join-Path $outMod "About\About.xml"))) {
+        [System.IO.File]::WriteAllText((Join-Path $outMod "About\About.xml"), $aboutText, (New-Object System.Text.UTF8Encoding($false)))
+    }
 
 
     $previewCreated = $false
@@ -786,11 +1465,14 @@ Mod Translation Toolkit v$AppVersion
 Original mod: $($script:OriginalModName)
 PackageId: $($script:OriginalPackageId)
 Selected content version: $($script:SelectedContentVersion)
-Keyed entries: $keyed
+Language roots: $((Get-LanguageRoots $script:OriginalModPath) -join "; ")`nKeyed entries: $keyed
 DefInjected entries: $defs
 Translated entries: $translated
 Total unique entries: $($script:Entries.Count)
 Steam Workshop description: $steamDescriptionPath
+Polish existing coverage: $((Get-CoverageText "pl"))
+English existing coverage: $((Get-CoverageText "en"))
+Existing target entries auto-loaded: $((AutoLoad-ExistingTargetTranslation))
 Preview generated: $previewCreated
 "@
     [System.IO.File]::WriteAllText((Join-Path $outMod "TranslationBuildReport.txt"), $report, (New-Object System.Text.UTF8Encoding($false)))
@@ -1148,7 +1830,7 @@ $null = $langWindow.ShowDialog()
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Mod Translation Toolkit v0.1.8"
+        Title="Mod Translation Toolkit v0.2.8"
         Height="840" Width="1260"
         WindowStartupLocation="CenterScreen"
         Background="#121018"
@@ -1286,7 +1968,7 @@ $null = $langWindow.ShowDialog()
           <TextBlock Text="RimWorld profile • dark Mrokar theme" Foreground="#AFA2C0" FontSize="12"/>
         </StackPanel>
         <Border Grid.Column="1" Background="#2B2038" CornerRadius="5" Padding="10,5" VerticalAlignment="Center">
-          <TextBlock Text="v0.1.8" Foreground="#CDA8F2" FontWeight="SemiBold"/>
+          <TextBlock Text="v0.2.8" Foreground="#CDA8F2" FontWeight="SemiBold"/>
         </Border>
       </Grid>
     </Border>
@@ -1295,6 +1977,7 @@ $null = $langWindow.ShowDialog()
       <TabItem Name="tabTranslation" Header="Tłumaczenie">
         <Grid Margin="12" Background="{StaticResource Bg}">
           <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
@@ -1357,26 +2040,56 @@ $null = $langWindow.ShowDialog()
               <ComboBoxItem Content="English" Tag="en"/>
               <ComboBoxItem Content="Polski" Tag="pl"/>
             </ComboBox>
-            <Button Name="btnAutoTranslate" Content="Tłumacz automatycznie"/>
+            <Button Name="btnAutoTranslate" Content="Tłumacz brakujące"/>
             <Button Name="btnValidate" Content="Sprawdź / napraw placeholdery"/>
             <Button Name="btnBuild" Content="Zbuduj oddzielny mod"/>
             <Button Name="btnCopyWorkshop" Content="Kopiuj opis Workshop" IsEnabled="False"/>
             <Label Name="lblCount" Content="Wpisy: 0" VerticalContentAlignment="Center"/>
           </WrapPanel>
 
-          <DataGrid Grid.Row="3" Name="grid" AutoGenerateColumns="False" CanUserAddRows="False"
+
+          <Border Grid.Row="3" Background="#19151F" BorderBrush="#40344F" BorderThickness="1"
+                  CornerRadius="4" Padding="8" Margin="0,0,0,10">
+            <StackPanel Orientation="Horizontal">
+              <TextBlock Name="lblCoverageTitle" Text="Istniejące języki:" VerticalAlignment="Center"
+                         Foreground="#B9AEC9" Margin="0,0,10,0"/>
+              <TextBlock Name="txtCoveragePL" Text="Polski: -" VerticalAlignment="Center"
+                         Foreground="#D4B5F5" Margin="0,0,12,0"/>
+              <Button Name="btnLoadExistingPL" Content="Wczytaj ponownie PL" IsEnabled="False"/>
+              <TextBlock Name="txtCoverageEN" Text="English: -" VerticalAlignment="Center"
+                         Foreground="#D4B5F5" Margin="8,0,12,0"/>
+              <Button Name="btnLoadExistingEN" Content="Wczytaj ponownie EN" IsEnabled="False"/>
+            </StackPanel>
+          </Border>
+
+          <DataGrid Grid.Row="4" Name="grid" AutoGenerateColumns="False" CanUserAddRows="False"
                     CanUserDeleteRows="False" IsReadOnly="False" SelectionMode="Extended"
                     EnableRowVirtualization="True" AlternationCount="2">
             <DataGrid.Columns>
               <DataGridTextColumn Header="Typ" Binding="{Binding Kind}" Width="95" IsReadOnly="True"/>
               <DataGridTextColumn Header="Plik" Binding="{Binding File}" Width="180" IsReadOnly="True"/>
               <DataGridTextColumn Header="Klucz" Binding="{Binding Key}" Width="230" IsReadOnly="True"/>
-              <DataGridTextColumn Header="Angielski" Binding="{Binding Source}" Width="*" IsReadOnly="True"/>
+              <DataGridTemplateColumn Header="Angielski" Width="*">
+                <DataGridTemplateColumn.CellTemplate>
+                  <DataTemplate>
+                    <TextBox Text="{Binding Source}"
+                             IsReadOnly="True"
+                             IsReadOnlyCaretVisible="True"
+                             BorderThickness="0"
+                             Background="Transparent"
+                             Foreground="#ECE8F6"
+                             Padding="2,0"
+                             VerticalContentAlignment="Center"
+                             TextWrapping="NoWrap"
+                             ToolTip="Zaznacz tekst i użyj Ctrl+C lub prawego przycisku myszy."/>
+                  </DataTemplate>
+                </DataGridTemplateColumn.CellTemplate>
+              </DataGridTemplateColumn>
               <DataGridTextColumn Header="Polski" Binding="{Binding Translation, UpdateSourceTrigger=PropertyChanged}" Width="*"/>
             </DataGrid.Columns>
           </DataGrid>
 
-          <TextBlock Grid.Row="4" Name="txtStatus" Margin="0,10,0,0" TextWrapping="Wrap"
+          <TextBlock Grid.Row="5" Name="txtStatus" Margin="0,10,0,0" TextWrapping="Wrap"
                      Foreground="#B9AEC9"
                      Text="Wybierz mod ręcznie albo przejdź do zakładki „Zainstalowane mody”."/>
         </Grid>
@@ -1410,7 +2123,7 @@ $null = $langWindow.ShowDialog()
           </DataGrid>
 
           <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,10,0,0">
-            <Button Name="btnUseSelected" Content="Tłumacz wybrany mod"/>
+            <Button Name="btnUseSelected" Content="Tłumacz / edytuj wybrany mod"/>
             <Button Name="btnOpenFolder" Content="Otwórz folder moda"/>
           </StackPanel>
         </Grid>
@@ -1446,10 +2159,53 @@ $window = [Windows.Markup.XamlReader]::Load($reader)
 $names = @(
     "btnChooseMod","btnAnalyze","btnExport","btnImport","btnAutoTranslate","btnValidate","btnBuild",
     "txtModPath","txtModName","txtPackageId","txtAuthor","grid","lblCount","txtStatus",
-    "btnDetect","txtSearch","lblMods","modsGrid","btnUseSelected","btnOpenFolder","btnOpenCurrentFolder","cmbSourceLang","cmbTargetLang","lblSourceLang","lblTargetLang","tabTranslation","tabInstalledMods","tabGameProfiles","chkPreviewFlag","cmbPreviewFlag","btnCopyWorkshop"
+    "btnDetect","txtSearch","lblMods","modsGrid","btnUseSelected","btnOpenFolder","btnOpenCurrentFolder","cmbSourceLang","cmbTargetLang","lblSourceLang","lblTargetLang","tabTranslation","tabInstalledMods","tabGameProfiles","chkPreviewFlag","cmbPreviewFlag","btnCopyWorkshop","lblCoverageTitle","txtCoveragePL","txtCoverageEN","btnLoadExistingPL","btnLoadExistingEN"
 )
 foreach ($n in $names) { Set-Variable -Name $n -Value $window.FindName($n) }
 
+
+
+function Get-CoverageText([string]$code) {
+    if (-not $script:LanguageCoverage.ContainsKey($code)) {
+        return if ($code -eq "pl") { "Polski: -" } else { "English: -" }
+    }
+
+    $c = $script:LanguageCoverage[$code]
+    $name = if ($code -eq "pl") { "Polski" } else { "English" }
+
+    $statusText = if ($script:UiLanguage -eq "en") {
+        switch ($c.Status) {
+            "none" { "none" }
+            "partial" { "partial" }
+            "complete" { "complete" }
+            default { $c.Status }
+        }
+    } else {
+        switch ($c.Status) {
+            "none" { "brak" }
+            "partial" { "częściowe" }
+            "complete" { "pełne" }
+            default { $c.Status }
+        }
+    }
+
+    return "$name`: $($c.Matched)/$($c.Total) ($($c.Percent)%) - $statusText"
+}
+
+function Refresh-LanguageCoverageUi {
+    $txtCoveragePL.Text = Get-CoverageText "pl"
+    $txtCoverageEN.Text = Get-CoverageText "en"
+
+    $btnLoadExistingPL.IsEnabled = (
+        $script:ExistingTranslations.ContainsKey("pl") -and
+        $script:ExistingTranslations["pl"].Count -gt 0
+    )
+
+    $btnLoadExistingEN.IsEnabled = (
+        $script:ExistingTranslations.ContainsKey("en") -and
+        $script:ExistingTranslations["en"].Count -gt 0
+    )
+}
 
 function Apply-UiLanguage {
     if ($script:UiLanguage -ne "en") {
@@ -1463,6 +2219,9 @@ function Apply-UiLanguage {
     $tabTranslation.Header = "Translation"
     $tabInstalledMods.Header = "Installed mods"
     $tabGameProfiles.Header = "Game profiles"
+    $lblCoverageTitle.Text = "Existing languages:"
+    $btnLoadExistingPL.Content = "Reload Polish"
+    $btnLoadExistingEN.Content = "Reload English"
     $window.FindName("btnChooseMod").Content = "Choose mod folder"
     $window.FindName("btnAnalyze").Content = "Scan again"
     $window.FindName("btnOpenCurrentFolder").Content = "Open mod folder"
@@ -1471,7 +2230,7 @@ function Apply-UiLanguage {
     $window.FindName("btnImport").Content = "Import CSV"
     $window.FindName("lblSourceLang").Content = "From:"
     $window.FindName("lblTargetLang").Content = "To:"
-    $window.FindName("btnAutoTranslate").Content = "Auto translate"
+    $window.FindName("btnAutoTranslate").Content = "Translate missing"
     $window.FindName("btnValidate").Content = "Check / repair placeholders"
     $window.FindName("btnBuild").Content = "Build separate translation mod"
     $btnCopyWorkshop.Content = "Copy Workshop description"
@@ -1517,6 +2276,11 @@ $cmbTargetLang.Add_SelectionChanged({
                 if ([string]$item.Tag -eq "GB") { $cmbPreviewFlag.SelectedItem = $item; break }
             }
         }
+
+        if ($script:OriginalModPath) {
+            [void](AutoLoad-ExistingTargetTranslation)
+            Refresh-LanguageCoverageUi
+        }
     } catch {}
 })
 
@@ -1525,13 +2289,67 @@ $btnChooseMod.Add_Click({
     $dlg.Description = "Wybierz główny folder moda RimWorld"
     if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         $txtModPath.Text = $dlg.SelectedPath
+            $script:EditingTranslationModPath = ""
+            $script:EditingTranslationPackageId = ""
+            $script:EditingTranslationName = ""
         try {
             $scan = Analyze-Mod $dlg.SelectedPath
-            $txtStatus.Text = "Znaleziono $($scan.Total) unikalnych wpisów: Keyed $($scan.LanguageEntries), DefInjected $($scan.DefEntries). Wersja zawartości: $($scan.ContentVersion)."
+            $txtStatus.Text = "Znaleziono $($scan.Total) unikalnych wpisów. Automatycznie podstawiono istniejących wpisów: $($scan.AutoLoadedExisting). Wersja zawartości: $($scan.ContentVersion)."
+            Refresh-LanguageCoverageUi
         } catch { [System.Windows.MessageBox]::Show($_.Exception.Message, "Błąd") }
     }
 })
 
+
+
+
+$grid.Add_PreviewKeyDown({
+    param($sender, $e)
+
+    try {
+        if ($e.Key -eq [System.Windows.Input.Key]::C -and
+            ([System.Windows.Input.Keyboard]::Modifiers -band [System.Windows.Input.ModifierKeys]::Control)) {
+
+            $focused = [System.Windows.Input.Keyboard]::FocusedElement
+
+            # If focus is already inside a TextBox, let the TextBox perform normal selected-text copying.
+            if ($focused -is [System.Windows.Controls.TextBox]) {
+                return
+            }
+
+            if ($null -ne $grid.SelectedItem) {
+                $sourceText = [string]$grid.SelectedItem.Source
+                if (-not [string]::IsNullOrEmpty($sourceText)) {
+                    [System.Windows.Clipboard]::SetText($sourceText)
+                    $txtStatus.Text = if ($script:UiLanguage -eq "en") {
+                        "Source text copied to clipboard."
+                    } else {
+                        "Skopiowano tekst oryginalny do schowka."
+                    }
+                    $e.Handled = $true
+                }
+            }
+        }
+    } catch {}
+})
+
+$btnLoadExistingPL.Add_Click({
+    $loaded = Apply-ExistingTranslation "pl"
+    $txtStatus.Text = if ($script:UiLanguage -eq "en") {
+        "Loaded $loaded existing Polish translation entries."
+    } else {
+        "Załadowano $loaded istniejących polskich wpisów tłumaczenia."
+    }
+})
+
+$btnLoadExistingEN.Add_Click({
+    $loaded = Apply-ExistingTranslation "en"
+    $txtStatus.Text = if ($script:UiLanguage -eq "en") {
+        "Loaded $loaded existing English translation entries."
+    } else {
+        "Załadowano $loaded istniejących angielskich wpisów tłumaczenia."
+    }
+})
 
 $btnOpenCurrentFolder.Add_Click({
     if ($script:OriginalModPath -and (Test-Path $script:OriginalModPath)) {
@@ -1543,7 +2361,7 @@ $btnOpenCurrentFolder.Add_Click({
 
 $btnAnalyze.Add_Click({
     if ($txtModPath.Text) {
-        try { Analyze-Mod $txtModPath.Text; $txtStatus.Text = "Skan zakończony." }
+        try { $scan = Analyze-Mod $txtModPath.Text; Refresh-LanguageCoverageUi; $txtStatus.Text = "Skan zakończony." }
         catch { [System.Windows.MessageBox]::Show($_.Exception.Message, "Błąd") }
     }
 })
@@ -1745,6 +2563,23 @@ $btnBuild.Add_Click({
         }
     }
 
+    if (-not [string]::IsNullOrWhiteSpace($script:EditingTranslationModPath)) {
+        try {
+            $out = Build-TranslationMod (Split-Path $script:EditingTranslationModPath -Parent)
+            $script:LastWorkshopDescriptionPath = Join-Path $out "SteamWorkshopDescription.txt"
+            $btnCopyWorkshop.IsEnabled = (Test-Path $script:LastWorkshopDescriptionPath)
+            $txtStatus.Text = if ($script:UiLanguage -eq "en") {
+                "Existing translation mod updated: $out"
+            } else {
+                "Zaktualizowano istniejący mod tłumaczeniowy: $out"
+            }
+            [System.Windows.MessageBox]::Show("Zapisano zmiany.`n`n$out","Mod Translation Toolkit")
+        } catch {
+            [System.Windows.MessageBox]::Show($_.Exception.Message,"Błąd")
+        }
+        return
+    }
+
     $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
     $dlg.Description = if ($script:UiLanguage -eq "en") {
         "Choose the folder where the separate translation mod should be created"
@@ -1785,23 +2620,38 @@ $btnUseSelected.Add_Click({
     $m = $modsGrid.SelectedItem
     if ($null -eq $m) { return }
 
-    $txtModPath.Text = $m.Path
     try {
-        $scan = Analyze-Mod $m.Path
-        $window.Content.Children[1].SelectedIndex = 0
-        $txtStatus.Text = "Wybrano: $($m.Name). Wpisy: $($scan.Total), w tym DefInjected: $($scan.DefEntries)."
-    } catch { [System.Windows.MessageBox]::Show($_.Exception.Message,"Błąd") }
+        $translationInfo = Get-TranslationModInfo ([string]$m.Path)
+
+        if ($translationInfo.IsTranslationMod) {
+            $edit = Open-ExistingTranslationMod ([string]$m.Path)
+            $txtModPath.Text = [string]$edit.Original.Path
+            $window.Content.Children[1].SelectedIndex = 0
+            Refresh-LanguageCoverageUi
+            $txtStatus.Text = if ($script:UiLanguage -eq "en") {
+                "Editing: $($translationInfo.Name). Loaded $($edit.Loaded)/$($edit.Total) existing entries. Original: $($edit.Original.Name). Resolved via: $($edit.ResolveMethod)."
+            } else {
+                "Edycja: $($translationInfo.Name). Wczytano $($edit.Loaded)/$($edit.Total) istniejących wpisów. Oryginał: $($edit.Original.Name). Wykrycie źródła: $($edit.ResolveMethod)."
+            }
+        } else {
+            $script:EditingTranslationModPath = ""
+            $script:EditingTranslationPackageId = ""
+            $script:EditingTranslationName = ""
+
+            $txtModPath.Text = $m.Path
+            $scan = Analyze-Mod $m.Path
+            $window.Content.Children[1].SelectedIndex = 0
+            $txtStatus.Text = "Wybrano: $($m.Name). Wpisy: $($scan.Total). Automatycznie podstawiono istniejących: $($scan.AutoLoadedExisting). Oryginał można zaznaczać i kopiować Ctrl+C."
+            Refresh-LanguageCoverageUi
+        }
+    } catch {
+        [System.Windows.MessageBox]::Show($_.Exception.Message,"Błąd")
+    }
 })
 
 $modsGrid.Add_MouseDoubleClick({
-    $m = $modsGrid.SelectedItem
-    if ($null -ne $m) {
-        $txtModPath.Text = $m.Path
-        try {
-            Analyze-Mod $m.Path
-            $window.Content.Children[1].SelectedIndex = 0
-            $txtStatus.Text = "Wybrano: $($m.Name)."
-        } catch {}
+    if ($null -ne $modsGrid.SelectedItem) {
+        $btnUseSelected.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
     }
 })
 
