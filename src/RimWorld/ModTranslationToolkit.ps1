@@ -4,9 +4,10 @@
 
 Add-Type -AssemblyName PresentationFramework
 Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-$AppVersion = "0.1.4"
+$AppVersion = "0.1.8"
 $script:UiLanguage = "pl"
 $script:Entries = New-Object System.Collections.ArrayList
 $script:Mods = New-Object System.Collections.ArrayList
@@ -18,6 +19,8 @@ $script:DetectedFromDefs = $false
 $script:OriginalSupportedVersions = @()
 $script:OriginalWorkshopUrl = ""
 $script:OriginalDownloadUrl = ""
+$script:OriginalAuthor = ""
+$script:LastWorkshopDescriptionPath = ""
 $script:SelectedContentVersion = ""
 $script:EntryKeys = @{}
 
@@ -151,6 +154,7 @@ function Read-AboutXml([string]$modPath) {
     $script:OriginalSupportedVersions = @($i.SupportedVersions)
     $script:OriginalWorkshopUrl = $i.WorkshopUrl
     $script:OriginalDownloadUrl = $i.DownloadUrl
+    $script:OriginalAuthor = $i.Author
 }
 
 function Add-Entry([string]$kind, [string]$relativeFile, [string]$key, [string]$source, [string]$defType="", [string]$defName="", [string]$field="") {
@@ -419,13 +423,276 @@ function Write-LanguageFiles([string]$outMod) {
     }
 }
 
+
+function Draw-FlagOverlay([System.Drawing.Graphics]$g, [string]$flagCode, [int]$x, [int]$y, [int]$w, [int]$h) {
+    $g.SmoothingMode = [System.Drawing.Drawing2D.SmoothingMode]::AntiAlias
+    $g.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+
+    $white = [System.Drawing.Brushes]::White
+    $black = [System.Drawing.Brushes]::Black
+    $red = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(220, 25, 35))
+    $blue = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(25, 65, 135))
+    $yellow = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(245, 205, 55))
+    $green = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(20, 145, 80))
+
+    try {
+        switch ($flagCode) {
+            "PL" {
+                $g.FillRectangle($white, $x, $y, $w, [int]($h/2))
+                $g.FillRectangle($red, $x, $y + [int]($h/2), $w, $h - [int]($h/2))
+            }
+            "GB" {
+                $g.FillRectangle($blue, $x, $y, $w, $h)
+
+                $penW = [Math]::Max(2, [int]($h * 0.18))
+                $penW2 = [Math]::Max(1, [int]($h * 0.08))
+                $pw = New-Object System.Drawing.Pen ([System.Drawing.Color]::White, $penW)
+                $pr = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(220,25,35), $penW2)
+                $g.DrawLine($pw, $x, $y, $x+$w, $y+$h)
+                $g.DrawLine($pw, $x+$w, $y, $x, $y+$h)
+                $g.DrawLine($pr, $x, $y, $x+$w, $y+$h)
+                $g.DrawLine($pr, $x+$w, $y, $x, $y+$h)
+                $pw.Dispose(); $pr.Dispose()
+
+                $crossW = [Math]::Max(2, [int]($h * 0.28))
+                $crossR = [Math]::Max(1, [int]($h * 0.14))
+                $pww = New-Object System.Drawing.Pen ([System.Drawing.Color]::White, $crossW)
+                $prr = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(220,25,35), $crossR)
+                $g.DrawLine($pww, $x + [int]($w/2), $y, $x + [int]($w/2), $y+$h)
+                $g.DrawLine($pww, $x, $y + [int]($h/2), $x+$w, $y + [int]($h/2))
+                $g.DrawLine($prr, $x + [int]($w/2), $y, $x + [int]($w/2), $y+$h)
+                $g.DrawLine($prr, $x, $y + [int]($h/2), $x+$w, $y + [int]($h/2))
+                $pww.Dispose(); $prr.Dispose()
+            }
+            "DE" {
+                $g.FillRectangle($black, $x, $y, $w, [int]($h/3))
+                $g.FillRectangle($red, $x, $y+[int]($h/3), $w, [int]($h/3))
+                $g.FillRectangle($yellow, $x, $y+[int](2*$h/3), $w, $h-[int](2*$h/3))
+            }
+            "FR" {
+                $g.FillRectangle($blue, $x, $y, [int]($w/3), $h)
+                $g.FillRectangle($white, $x+[int]($w/3), $y, [int]($w/3), $h)
+                $g.FillRectangle($red, $x+[int](2*$w/3), $y, $w-[int](2*$w/3), $h)
+            }
+            "ES" {
+                $g.FillRectangle($red, $x, $y, $w, [int]($h*0.25))
+                $g.FillRectangle($yellow, $x, $y+[int]($h*0.25), $w, [int]($h*0.5))
+                $g.FillRectangle($red, $x, $y+[int]($h*0.75), $w, $h-[int]($h*0.75))
+            }
+            "IT" {
+                $g.FillRectangle($green, $x, $y, [int]($w/3), $h)
+                $g.FillRectangle($white, $x+[int]($w/3), $y, [int]($w/3), $h)
+                $g.FillRectangle($red, $x+[int](2*$w/3), $y, $w-[int](2*$w/3), $h)
+            }
+            "CZ" {
+                $g.FillRectangle($white, $x, $y, $w, [int]($h/2))
+                $g.FillRectangle($red, $x, $y+[int]($h/2), $w, $h-[int]($h/2))
+                $pts = New-Object 'System.Drawing.Point[]' 3
+                $pts[0] = New-Object System.Drawing.Point($x,$y)
+                $pts[1] = New-Object System.Drawing.Point($x+[int]($w*0.45),$y+[int]($h/2))
+                $pts[2] = New-Object System.Drawing.Point($x,$y+$h)
+                $g.FillPolygon($blue,$pts)
+            }
+            "UA" {
+                $g.FillRectangle($blue, $x, $y, $w, [int]($h/2))
+                $g.FillRectangle($yellow, $x, $y+[int]($h/2), $w, $h-[int]($h/2))
+            }
+            "JP" {
+                $g.FillRectangle($white, $x, $y, $w, $h)
+                $jr = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(190,0,45))
+                $g.FillEllipse($jr, $x+[int]($w*0.34), $y+[int]($h*0.18), [int]($w*0.32), [int]($h*0.64))
+                $jr.Dispose()
+            }
+            "KR" {
+                $g.FillRectangle($white, $x, $y, $w, $h)
+                $br = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(205,45,55))
+                $bb = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(35,80,165))
+                $g.FillPie($br, $x+[int]($w*0.34), $y+[int]($h*0.18), [int]($w*0.32), [int]($h*0.64), 180, 180)
+                $g.FillPie($bb, $x+[int]($w*0.34), $y+[int]($h*0.18), [int]($w*0.32), [int]($h*0.64), 0, 180)
+                $br.Dispose(); $bb.Dispose()
+            }
+            "CN" {
+                $g.FillRectangle($red, $x, $y, $w, $h)
+                $g.FillEllipse($yellow, $x+[int]($w*0.12), $y+[int]($h*0.15), [int]($h*0.22), [int]($h*0.22))
+            }
+            "PT" {
+                $g.FillRectangle($green, $x, $y, [int]($w*0.4), $h)
+                $g.FillRectangle($red, $x+[int]($w*0.4), $y, $w-[int]($w*0.4), $h)
+                $g.FillEllipse($yellow, $x+[int]($w*0.32), $y+[int]($h*0.3), [int]($h*0.4), [int]($h*0.4))
+            }
+            default {
+                $g.FillRectangle($white, $x, $y, $w, $h)
+            }
+        }
+
+        $borderPen = New-Object System.Drawing.Pen ([System.Drawing.Color]::FromArgb(220,255,255,255), 2)
+        $g.DrawRectangle($borderPen, $x, $y, $w, $h)
+        $borderPen.Dispose()
+    }
+    finally {
+        $red.Dispose()
+        $blue.Dispose()
+        $yellow.Dispose()
+        $green.Dispose()
+    }
+}
+
+function Build-TranslationPreview([string]$outMod, [string]$flagCode) {
+    if ([string]::IsNullOrWhiteSpace($script:OriginalModPath)) { return $false }
+
+    $previewCandidates = @(
+        (Join-Path $script:OriginalModPath "About\Preview.png"),
+        (Join-Path $script:OriginalModPath "About\Preview.jpg"),
+        (Join-Path $script:OriginalModPath "About\Preview.jpeg")
+    )
+
+    $src = $previewCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    if (-not $src) { return $false }
+
+    $aboutDir = Join-Path $outMod "About"
+    New-Item -ItemType Directory -Path $aboutDir -Force | Out-Null
+    $dest = Join-Path $aboutDir "Preview.png"
+
+    $img = [System.Drawing.Image]::FromFile($src)
+    try {
+        $bmp = New-Object System.Drawing.Bitmap($img.Width, $img.Height)
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+
+        try {
+            $g.DrawImage($img, 0, 0, $img.Width, $img.Height)
+
+            $flagW = [Math]::Max(90, [int]($img.Width * 0.20))
+            $flagH = [Math]::Max(55, [int]($flagW * 0.62))
+            $margin = [Math]::Max(12, [int]($img.Width * 0.02))
+            $x = $img.Width - $flagW - $margin
+            $y = $img.Height - $flagH - $margin
+
+            # dark backing plate so the flag reads clearly on any preview
+            $shadow = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(150, 0, 0, 0))
+            $g.FillRectangle($shadow, $x-6, $y-6, $flagW+12, $flagH+12)
+            $shadow.Dispose()
+
+            Draw-FlagOverlay $g $flagCode $x $y $flagW $flagH
+        }
+        finally {
+            $g.Dispose()
+        }
+
+        $bmp.Save($dest, [System.Drawing.Imaging.ImageFormat]::Png)
+        $bmp.Dispose()
+    }
+    finally {
+        $img.Dispose()
+    }
+
+    return $true
+}
+
+
+function Get-TargetLanguageInfo {
+    $code = "pl"
+    try {
+        if ($null -ne $cmbTargetLang.SelectedItem) {
+            $code = [string]$cmbTargetLang.SelectedItem.Tag
+        }
+    } catch {}
+
+    switch ($code) {
+        "pl" {
+            return [pscustomobject]@{
+                Code="pl"; RimWorldFolder="Polish"; DisplayEnglish="Polish"; DisplayNative="Polskie"; WorkshopSuffix="Polish Translation"
+            }
+        }
+        "en" {
+            return [pscustomobject]@{
+                Code="en"; RimWorldFolder="English"; DisplayEnglish="English"; DisplayNative="English"; WorkshopSuffix="English Translation"
+            }
+        }
+        default {
+            return [pscustomobject]@{
+                Code=$code; RimWorldFolder="Polish"; DisplayEnglish="Translation"; DisplayNative="Translation"; WorkshopSuffix="Translation"
+            }
+        }
+    }
+}
+
+function Build-SteamWorkshopDescription([string]$outMod, [string]$translationAuthor) {
+    $lang = Get-TargetLanguageInfo
+    $originalLink = $script:OriginalWorkshopUrl
+    if ([string]::IsNullOrWhiteSpace($originalLink)) {
+        $originalLink = $script:OriginalDownloadUrl
+    }
+
+    $toolUrl = "https://github.com/DrizztGaming/Mod-Translation-Toolkit"
+    $kofiUrl = "https://ko-fi.com/drizztgaming"
+
+    $originalAuthorLine = ""
+    if (-not [string]::IsNullOrWhiteSpace($script:OriginalAuthor)) {
+        $originalAuthorLine = "[*]Original mod author: $($script:OriginalAuthor)`r`n"
+    }
+
+    $translatorLine = ""
+    if (-not [string]::IsNullOrWhiteSpace($translationAuthor)) {
+        $translatorLine = "[*]Translation: $translationAuthor`r`n"
+    }
+
+    $requirements = if (-not [string]::IsNullOrWhiteSpace($originalLink)) {
+        "[url=$originalLink]$($script:OriginalModName)[/url]"
+    } else {
+        $script:OriginalModName
+    }
+
+    $description = @"
+[h1]$($script:OriginalModName) - $($lang.WorkshopSuffix)[/h1]
+
+$($lang.DisplayEnglish) translation for [b]$($script:OriginalModName)[/b].
+
+[b]Requires the original mod.[/b]
+
+[h1]Requirements[/h1]
+[list]
+[*]$requirements
+[/list]
+
+[h1]Original Mod[/h1]
+$requirements
+
+[h1]Credits[/h1]
+[list]
+$originalAuthorLine$translatorLine[*]Translation package generated with [url=$toolUrl]Mod Translation Toolkit[/url]
+[/list]
+
+[h1]Mod Translation Toolkit[/h1]
+This translation package was created with [url=$toolUrl][b]Mod Translation Toolkit[/b][/url].
+
+The toolkit is designed to make both manual and assisted mod translation easier, including file detection, DefInjected generation, placeholder checks, CSV workflows and translation-mod packaging.
+
+[url=$toolUrl]GitHub - Mod Translation Toolkit[/url]
+
+[h1]Support[/h1]
+If you enjoy my mods and tools, you can support my work here:
+
+[url=$kofiUrl][b]☕ Support me on Ko-fi[/b][/url]
+"@
+
+    $path = Join-Path $outMod "SteamWorkshopDescription.txt"
+    [System.IO.File]::WriteAllText(
+        $path,
+        $description,
+        (New-Object System.Text.UTF8Encoding($false))
+    )
+
+    return $path
+}
+
 function Build-TranslationMod([string]$parentFolder) {
+    $lang = Get-TargetLanguageInfo
     if ([string]::IsNullOrWhiteSpace($script:OriginalPackageId)) {
         throw "Oryginalny mod nie ma packageId w About.xml."
     }
 
     $safeName = ($script:OriginalModName -replace '[\\/:*?"<>|]', '_')
-    $outMod = Join-Path $parentFolder "$safeName - Polish Translation"
+    $outMod = Join-Path $parentFolder "$safeName - $($lang.WorkshopSuffix)"
 
     if (Test-Path $outMod) {
         Remove-Item -LiteralPath $outMod -Recurse -Force
@@ -437,7 +704,7 @@ function Build-TranslationMod([string]$parentFolder) {
     $author = $txtAuthor.Text.Trim()
     if ([string]::IsNullOrWhiteSpace($author)) { $author = "Community translation" }
 
-    $pkg = ($script:OriginalPackageId + ".polishtranslation").ToLowerInvariant()
+    $pkg = ($script:OriginalPackageId + "." + $lang.Code + "translation").ToLowerInvariant()
 
     $supportedXml = ""
     if ($script:OriginalSupportedVersions.Count -gt 0) {
@@ -468,11 +735,14 @@ function Build-TranslationMod([string]$parentFolder) {
     $aboutText = @"
 <?xml version="1.0" encoding="utf-8"?>
 <ModMetaData>
-  <name>$([System.Security.SecurityElement]::Escape($script:OriginalModName)) - Polish Translation</name>
+  <name>$([System.Security.SecurityElement]::Escape($script:OriginalModName)) - $($lang.WorkshopSuffix)</name>
   <author>$([System.Security.SecurityElement]::Escape($author))</author>
   <packageId>$pkg</packageId>
   <modVersion>1.0.0</modVersion>
-$supportedXml  <description>Polish translation for $([System.Security.SecurityElement]::Escape($script:OriginalModName)). Requires the original mod.</description>
+$supportedXml  <description>$($lang.DisplayEnglish) translation for $([System.Security.SecurityElement]::Escape($script:OriginalModName)). Requires the original mod.
+
+Created with Mod Translation Toolkit.
+Project: https://github.com/DrizztGaming/Mod-Translation-Toolkit</description>
   <modDependencies>
     <li>
       <packageId>$([System.Security.SecurityElement]::Escape($script:OriginalPackageId))</packageId>
@@ -486,6 +756,25 @@ $dependencyLinks    </li>
 "@
 
     [System.IO.File]::WriteAllText((Join-Path $outMod "About\About.xml"), $aboutText, (New-Object System.Text.UTF8Encoding($false)))
+
+
+    $previewCreated = $false
+    if ($chkPreviewFlag.IsChecked -eq $true -and $null -ne $cmbPreviewFlag.SelectedItem) {
+        $flagCode = [string]$cmbPreviewFlag.SelectedItem.Tag
+        try {
+            $previewCreated = Build-TranslationPreview $outMod $flagCode
+        } catch {
+            $previewCreated = $false
+        }
+    }
+
+
+    $steamDescriptionPath = ""
+    try {
+        $steamDescriptionPath = Build-SteamWorkshopDescription $outMod $author
+    } catch {
+        $steamDescriptionPath = ""
+    }
 
     # Small build report helps diagnose missing/duplicate translation data later.
     $keyed = @($script:Entries | Where-Object { $_.Kind -eq "Language" }).Count
@@ -501,10 +790,152 @@ Keyed entries: $keyed
 DefInjected entries: $defs
 Translated entries: $translated
 Total unique entries: $($script:Entries.Count)
+Steam Workshop description: $steamDescriptionPath
+Preview generated: $previewCreated
 "@
     [System.IO.File]::WriteAllText((Join-Path $outMod "TranslationBuildReport.txt"), $report, (New-Object System.Text.UTF8Encoding($false)))
 
     return $outMod
+}
+
+
+function Get-MissingPlaceholders([string]$source, [string]$translation) {
+    $src = @(Get-Placeholders $source)
+    $tr = @(Get-Placeholders $translation)
+
+    $missing = New-Object System.Collections.ArrayList
+    $remaining = New-Object System.Collections.ArrayList
+    foreach ($x in $tr) { [void]$remaining.Add($x) }
+
+    foreach ($token in $src) {
+        $idx = $remaining.IndexOf($token)
+        if ($idx -ge 0) {
+            $remaining.RemoveAt($idx)
+        } else {
+            [void]$missing.Add($token)
+        }
+    }
+
+    return @($missing)
+}
+
+function Repair-TranslationPlaceholders([string]$source, [string]$translation) {
+    if ([string]::IsNullOrWhiteSpace($translation)) { return $translation }
+
+    $missing = @(Get-MissingPlaceholders $source $translation)
+    if ($missing.Count -eq 0) { return $translation }
+
+    $result = $translation
+
+    foreach ($token in $missing) {
+        if ($token -match '^\{(\d+)(?::[^}]*)?\}$') {
+            $n = $Matches[1]
+
+            if ($result -match "(?<!\{)$n\}") {
+                $result = [regex]::Replace($result, "(?<!\{)$n\}", "{$n}", 1)
+                continue
+            }
+
+            if ($result -match "\{$n(?!\})") {
+                $result = [regex]::Replace($result, "\{$n(?!\})", "{$n}", 1)
+                continue
+            }
+        }
+
+        if (-not $result.Contains($token)) {
+            $result = ($result.TrimEnd() + " " + $token).Trim()
+        }
+    }
+
+    return $result
+}
+
+function Highlight-PlaceholderErrors($badEntries) {
+    if ($null -eq $badEntries -or $badEntries.Count -eq 0) { return }
+
+    $grid.SelectedItems.Clear()
+    foreach ($e in $badEntries) {
+        try { [void]$grid.SelectedItems.Add($e) } catch {}
+    }
+
+    if ($badEntries.Count -gt 0) {
+        $grid.ScrollIntoView($badEntries[0])
+    }
+}
+
+function Show-RepairModeDialog {
+    $msg = if ($script:UiLanguage -eq "en") {
+        "Placeholder problems were found.`n`nYes = let the program repair them`nNo = repair manually (highlight rows only)`nCancel = do nothing"
+    } else {
+        "Wykryto problemy z placeholderami.`n`nTak = naprawi je program`nNie = napraw ręcznie (tylko podświetl wiersze)`nAnuluj = nic nie rób"
+    }
+
+    return [System.Windows.MessageBox]::Show(
+        $msg,
+        "Placeholder repair",
+        [System.Windows.MessageBoxButton]::YesNoCancel,
+        [System.Windows.MessageBoxImage]::Warning
+    )
+}
+
+function Show-AutoRepairScopeDialog {
+    $msg = if ($script:UiLanguage -eq "en") {
+        "How should the program repair placeholders?`n`nYes = repair all automatically`nNo = review every problem one by one"
+    } else {
+        "Jak program ma naprawić placeholdery?`n`nTak = napraw wszystko automatycznie`nNie = pokaż każdy błąd osobno do akceptacji"
+    }
+
+    return [System.Windows.MessageBox]::Show(
+        $msg,
+        "Placeholder repair",
+        [System.Windows.MessageBoxButton]::YesNo,
+        [System.Windows.MessageBoxImage]::Question
+    )
+}
+
+function Repair-PlaceholderErrorsInteractive($badEntries) {
+    $fixed = 0
+
+    foreach ($e in $badEntries) {
+        $proposal = Repair-TranslationPlaceholders $e.Source $e.Translation
+        if ($proposal -eq $e.Translation) { continue }
+
+        $msg = if ($script:UiLanguage -eq "en") {
+            "Key: $($e.Key)`n`nSOURCE:`n$($e.Source)`n`nCURRENT:`n$($e.Translation)`n`nPROPOSED FIX:`n$proposal`n`nApply this fix?"
+        } else {
+            "Klucz: $($e.Key)`n`nŹRÓDŁO:`n$($e.Source)`n`nOBECNIE:`n$($e.Translation)`n`nPROPONOWANA NAPRAWA:`n$proposal`n`nZastosować tę poprawkę?"
+        }
+
+        $ans = [System.Windows.MessageBox]::Show(
+            $msg,
+            "Placeholder repair",
+            [System.Windows.MessageBoxButton]::YesNo,
+            [System.Windows.MessageBoxImage]::Question
+        )
+
+        if ($ans -eq [System.Windows.MessageBoxResult]::Yes) {
+            $e.Translation = $proposal
+            $fixed++
+        }
+    }
+
+    Refresh-Grid
+    return $fixed
+}
+
+function Repair-PlaceholderErrorsAll($badEntries) {
+    $fixed = 0
+
+    foreach ($e in $badEntries) {
+        $proposal = Repair-TranslationPlaceholders $e.Source $e.Translation
+        if ($proposal -ne $e.Translation) {
+            $e.Translation = $proposal
+            $fixed++
+        }
+    }
+
+    Refresh-Grid
+    return $fixed
 }
 
 function Validate-Placeholders {
@@ -717,7 +1148,7 @@ $null = $langWindow.ShowDialog()
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Mod Translation Toolkit v0.1.4"
+        Title="Mod Translation Toolkit v0.1.8"
         Height="840" Width="1260"
         WindowStartupLocation="CenterScreen"
         Background="#121018"
@@ -855,7 +1286,7 @@ $null = $langWindow.ShowDialog()
           <TextBlock Text="RimWorld profile • dark Mrokar theme" Foreground="#AFA2C0" FontSize="12"/>
         </StackPanel>
         <Border Grid.Column="1" Background="#2B2038" CornerRadius="5" Padding="10,5" VerticalAlignment="Center">
-          <TextBlock Text="v0.1.4" Foreground="#CDA8F2" FontWeight="SemiBold"/>
+          <TextBlock Text="v0.1.8" Foreground="#CDA8F2" FontWeight="SemiBold"/>
         </Border>
       </Grid>
     </Border>
@@ -881,11 +1312,13 @@ $null = $langWindow.ShowDialog()
           <Grid Grid.Row="1" Margin="0,0,0,10">
             <Grid.ColumnDefinitions>
               <ColumnDefinition Width="Auto"/>
-              <ColumnDefinition Width="300"/>
+              <ColumnDefinition Width="260"/>
               <ColumnDefinition Width="Auto"/>
-              <ColumnDefinition Width="320"/>
+              <ColumnDefinition Width="280"/>
               <ColumnDefinition Width="Auto"/>
-              <ColumnDefinition Width="190"/>
+              <ColumnDefinition Width="170"/>
+              <ColumnDefinition Width="Auto"/>
+              <ColumnDefinition Width="150"/>
             </Grid.ColumnDefinitions>
             <Label Grid.Column="0" Content="Nazwa:"/>
             <TextBox Grid.Column="1" Name="txtModName" IsReadOnly="True" Margin="4"/>
@@ -893,6 +1326,22 @@ $null = $langWindow.ShowDialog()
             <TextBox Grid.Column="3" Name="txtPackageId" IsReadOnly="True" Margin="4"/>
             <Label Grid.Column="4" Content="Autor tłumaczenia:"/>
             <TextBox Grid.Column="5" Name="txtAuthor" Margin="4"/>
+            <CheckBox Grid.Column="6" Name="chkPreviewFlag" Content="Preview + flaga" Margin="8,4"
+                      Foreground="#ECE8F6" VerticalAlignment="Center" IsChecked="True"/>
+            <ComboBox Grid.Column="7" Name="cmbPreviewFlag" Width="145" Height="30" Margin="4" SelectedIndex="0">
+              <ComboBoxItem Content="Polska 🇵🇱" Tag="PL"/>
+              <ComboBoxItem Content="English / UK 🇬🇧" Tag="GB"/>
+              <ComboBoxItem Content="Deutsch 🇩🇪" Tag="DE"/>
+              <ComboBoxItem Content="Français 🇫🇷" Tag="FR"/>
+              <ComboBoxItem Content="Español 🇪🇸" Tag="ES"/>
+              <ComboBoxItem Content="Italiano 🇮🇹" Tag="IT"/>
+              <ComboBoxItem Content="Čeština 🇨🇿" Tag="CZ"/>
+              <ComboBoxItem Content="Українська 🇺🇦" Tag="UA"/>
+              <ComboBoxItem Content="日本語 🇯🇵" Tag="JP"/>
+              <ComboBoxItem Content="한국어 🇰🇷" Tag="KR"/>
+              <ComboBoxItem Content="中文 🇨🇳" Tag="CN"/>
+              <ComboBoxItem Content="Português 🇵🇹" Tag="PT"/>
+            </ComboBox>
           </Grid>
 
           <WrapPanel Grid.Row="2" Margin="0,0,0,10">
@@ -909,8 +1358,9 @@ $null = $langWindow.ShowDialog()
               <ComboBoxItem Content="Polski" Tag="pl"/>
             </ComboBox>
             <Button Name="btnAutoTranslate" Content="Tłumacz automatycznie"/>
-            <Button Name="btnValidate" Content="Sprawdź placeholdery"/>
+            <Button Name="btnValidate" Content="Sprawdź / napraw placeholdery"/>
             <Button Name="btnBuild" Content="Zbuduj oddzielny mod"/>
+            <Button Name="btnCopyWorkshop" Content="Kopiuj opis Workshop" IsEnabled="False"/>
             <Label Name="lblCount" Content="Wpisy: 0" VerticalContentAlignment="Center"/>
           </WrapPanel>
 
@@ -996,7 +1446,7 @@ $window = [Windows.Markup.XamlReader]::Load($reader)
 $names = @(
     "btnChooseMod","btnAnalyze","btnExport","btnImport","btnAutoTranslate","btnValidate","btnBuild",
     "txtModPath","txtModName","txtPackageId","txtAuthor","grid","lblCount","txtStatus",
-    "btnDetect","txtSearch","lblMods","modsGrid","btnUseSelected","btnOpenFolder","btnOpenCurrentFolder","cmbSourceLang","cmbTargetLang","lblSourceLang","lblTargetLang","tabTranslation","tabInstalledMods","tabGameProfiles"
+    "btnDetect","txtSearch","lblMods","modsGrid","btnUseSelected","btnOpenFolder","btnOpenCurrentFolder","cmbSourceLang","cmbTargetLang","lblSourceLang","lblTargetLang","tabTranslation","tabInstalledMods","tabGameProfiles","chkPreviewFlag","cmbPreviewFlag","btnCopyWorkshop"
 )
 foreach ($n in $names) { Set-Variable -Name $n -Value $window.FindName($n) }
 
@@ -1016,13 +1466,15 @@ function Apply-UiLanguage {
     $window.FindName("btnChooseMod").Content = "Choose mod folder"
     $window.FindName("btnAnalyze").Content = "Scan again"
     $window.FindName("btnOpenCurrentFolder").Content = "Open mod folder"
+    $chkPreviewFlag.Content = "Preview + flag"
     $window.FindName("btnExport").Content = "Export CSV"
     $window.FindName("btnImport").Content = "Import CSV"
     $window.FindName("lblSourceLang").Content = "From:"
     $window.FindName("lblTargetLang").Content = "To:"
     $window.FindName("btnAutoTranslate").Content = "Auto translate"
-    $window.FindName("btnValidate").Content = "Check placeholders"
+    $window.FindName("btnValidate").Content = "Check / repair placeholders"
     $window.FindName("btnBuild").Content = "Build separate translation mod"
+    $btnCopyWorkshop.Content = "Copy Workshop description"
     $window.FindName("lblCount").Content = "Entries: 0"
     $window.FindName("btnDetect").Content = "Detect Steam and mods"
     $window.FindName("lblMods").Content = "Mods: 0"
@@ -1052,6 +1504,21 @@ function Apply-UiLanguage {
 }
 
 Apply-UiLanguage
+
+$cmbTargetLang.Add_SelectionChanged({
+    try {
+        $tag = [string]$cmbTargetLang.SelectedItem.Tag
+        if ($tag -eq "pl") {
+            foreach ($item in $cmbPreviewFlag.Items) {
+                if ([string]$item.Tag -eq "PL") { $cmbPreviewFlag.SelectedItem = $item; break }
+            }
+        } elseif ($tag -eq "en") {
+            foreach ($item in $cmbPreviewFlag.Items) {
+                if ([string]$item.Tag -eq "GB") { $cmbPreviewFlag.SelectedItem = $item; break }
+            }
+        }
+    } catch {}
+})
 
 $btnChooseMod.Add_Click({
     $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
@@ -1101,11 +1568,54 @@ $btnImport.Add_Click({
 
 $btnValidate.Add_Click({
     $bad = Validate-Placeholders
+
     if ($bad.Count -eq 0) {
-        [System.Windows.MessageBox]::Show("Nie wykryto problemów z placeholderami.", "Kontrola")
+        $msg = if ($script:UiLanguage -eq "en") {
+            "No placeholder problems detected."
+        } else {
+            "Nie wykryto problemów z placeholderami."
+        }
+        [System.Windows.MessageBox]::Show($msg, "Placeholder check")
+        return
+    }
+
+    Highlight-PlaceholderErrors $bad
+
+    $mode = Show-RepairModeDialog
+    if ($mode -eq [System.Windows.MessageBoxResult]::Cancel) { return }
+
+    if ($mode -eq [System.Windows.MessageBoxResult]::No) {
+        $txtStatus.Text = if ($script:UiLanguage -eq "en") {
+            "$($bad.Count) problematic rows were highlighted."
+        } else {
+            "Podświetlono $($bad.Count) problematycznych wierszy."
+        }
+        return
+    }
+
+    $scope = Show-AutoRepairScopeDialog
+    if ($scope -eq [System.Windows.MessageBoxResult]::Yes) {
+        $fixed = Repair-PlaceholderErrorsAll $bad
     } else {
-        $names2 = ($bad | Select-Object -First 15 | ForEach-Object { "$($_.File) :: $($_.Key)" }) -join "`n"
-        [System.Windows.MessageBox]::Show("Wykryto $($bad.Count) podejrzanych wpisów:`n`n$names2", "Kontrola")
+        $fixed = Repair-PlaceholderErrorsInteractive $bad
+    }
+
+    $remaining = Validate-Placeholders
+    Highlight-PlaceholderErrors $remaining
+
+    $txtStatus.Text = if ($script:UiLanguage -eq "en") {
+        "Placeholder repair: fixed $fixed, remaining problems: $($remaining.Count)."
+    } else {
+        "Naprawa placeholderów: poprawiono $fixed, pozostało problemów: $($remaining.Count)."
+    }
+
+    if ($remaining.Count -eq 0) {
+        $msg = if ($script:UiLanguage -eq "en") {
+            "All detected placeholder problems have been resolved."
+        } else {
+            "Wszystkie wykryte problemy z placeholderami zostały rozwiązane."
+        }
+        [System.Windows.MessageBox]::Show($msg, "Placeholder repair")
     }
 })
 
@@ -1166,27 +1676,96 @@ $btnAutoTranslate.Add_Click({
     }
 })
 
+
+$btnCopyWorkshop.Add_Click({
+    if ($script:LastWorkshopDescriptionPath -and (Test-Path $script:LastWorkshopDescriptionPath)) {
+        try {
+            $content = Get-Content -LiteralPath $script:LastWorkshopDescriptionPath -Raw -Encoding UTF8
+            [System.Windows.Clipboard]::SetText($content)
+            $txtStatus.Text = if ($script:UiLanguage -eq "en") {
+                "Steam Workshop description copied to clipboard."
+            } else {
+                "Opis Steam Workshop skopiowany do schowka."
+            }
+        } catch {
+            [System.Windows.MessageBox]::Show($_.Exception.Message, "Clipboard")
+        }
+    }
+})
+
 $btnBuild.Add_Click({
     if ($script:Entries.Count -eq 0) { return }
 
     $bad = Validate-Placeholders
     if ($bad.Count -gt 0) {
+        Highlight-PlaceholderErrors $bad
+
+        $msg = if ($script:UiLanguage -eq "en") {
+            "There are still $($bad.Count) placeholder problems.`n`nYes = open repair workflow`nNo = build anyway`nCancel = stop"
+        } else {
+            "Nadal są $($bad.Count) problemy z placeholderami.`n`nTak = otwórz naprawę`nNie = zbuduj mimo to`nAnuluj = przerwij"
+        }
+
         $ans = [System.Windows.MessageBox]::Show(
-            "Wykryto $($bad.Count) wpisów z potencjalnie uszkodzonymi placeholderami. Mimo to budować?",
-            "Uwaga",
-            [System.Windows.MessageBoxButton]::YesNo
+            $msg,
+            "Placeholder warning",
+            [System.Windows.MessageBoxButton]::YesNoCancel,
+            [System.Windows.MessageBoxImage]::Warning
         )
-        if ($ans -ne [System.Windows.MessageBoxResult]::Yes) { return }
+
+        if ($ans -eq [System.Windows.MessageBoxResult]::Cancel) { return }
+
+        if ($ans -eq [System.Windows.MessageBoxResult]::Yes) {
+            $mode = Show-RepairModeDialog
+            if ($mode -eq [System.Windows.MessageBoxResult]::Cancel) { return }
+
+            if ($mode -eq [System.Windows.MessageBoxResult]::No) {
+                Highlight-PlaceholderErrors $bad
+                return
+            }
+
+            $scope = Show-AutoRepairScopeDialog
+            if ($scope -eq [System.Windows.MessageBoxResult]::Yes) {
+                [void](Repair-PlaceholderErrorsAll $bad)
+            } else {
+                [void](Repair-PlaceholderErrorsInteractive $bad)
+            }
+
+            $bad = Validate-Placeholders
+            if ($bad.Count -gt 0) {
+                Highlight-PlaceholderErrors $bad
+                $msg2 = if ($script:UiLanguage -eq "en") {
+                    "Some placeholder problems are still unresolved. Build cancelled."
+                } else {
+                    "Część problemów z placeholderami nadal nie jest rozwiązana. Budowanie anulowano."
+                }
+                [System.Windows.MessageBox]::Show($msg2, "Placeholder warning")
+                return
+            }
+        }
     }
 
     $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
-    $dlg.Description = "Wybierz folder, w którym ma powstać oddzielny mod PL"
+    $dlg.Description = if ($script:UiLanguage -eq "en") {
+        "Choose the folder where the separate translation mod should be created"
+    } else {
+        "Wybierz folder, w którym ma powstać oddzielny mod tłumaczeniowy"
+    }
+
     if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         try {
             $out = Build-TranslationMod $dlg.SelectedPath
-            $txtStatus.Text = "Gotowy mod: $out"
+            $script:LastWorkshopDescriptionPath = Join-Path $out "SteamWorkshopDescription.txt"
+            $btnCopyWorkshop.IsEnabled = (Test-Path $script:LastWorkshopDescriptionPath)
+            $txtStatus.Text = if ($script:UiLanguage -eq "en") {
+                "Translation mod created: $out"
+            } else {
+                "Gotowy mod: $out"
+            }
             [System.Windows.MessageBox]::Show("Gotowe.`n`n$out","Mod Translation Toolkit")
-        } catch { [System.Windows.MessageBox]::Show($_.Exception.Message,"Błąd") }
+        } catch {
+            [System.Windows.MessageBox]::Show($_.Exception.Message,"Błąd")
+        }
     }
 })
 

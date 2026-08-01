@@ -2,12 +2,21 @@
 
 A Windows desktop helper for translating game mods.
 
-> **Current release:** v0.1.4  
+> **Current release:** v0.1.8  
 > **Currently supported game:** RimWorld
 
 The project started as a small RimWorld translation helper and is being prepared as a multi-game toolkit with separate game profiles.
 
 ## Features
+
+- Automatically generates a ready-to-paste Steam Workshop description in BBCode.
+- Workshop description includes Requirements, Original Mod, Credits, Mod Translation Toolkit attribution, GitHub link and Ko-fi support section.
+- After building a translation mod, the generated Workshop description can be copied directly to the clipboard.
+
+- Generated translation mods include a permanent attribution to Mod Translation Toolkit and a link to the project repository: `https://github.com/DrizztGaming/Mod-Translation-Toolkit`.
+
+- Can copy the original RimWorld mod `About/Preview.png` into the generated translation mod.
+- Can overlay a language flag on the copied preview (Polish, UK/English, German, French, Spanish, Italian, Czech, Ukrainian, Japanese, Korean, Chinese, Portuguese).
 
 - Startup interface-language selector: Polish or English.
 - Automatic translation direction can be selected independently: English ↔ Polish.
@@ -25,7 +34,7 @@ The project started as a small RimWorld translation helper and is being prepared
 - Manual translation in a table.
 - CSV import/export.
 - Optional automatic English → Polish translation.
-- Basic placeholder validation (`{0}`, `{1}`, `%s`, `\n`).
+- Placeholder validation and repair (`{0}`, `{1}`, `%s`, `\n`).
 - Builds a separate RimWorld Polish translation mod with `About.xml`, `supportedVersions`, dependency metadata and source links.
 
 ## Run
@@ -63,8 +72,10 @@ Planned profile architecture:
 
 MIT. See `LICENSE`.
 
-## Support
 
-If you find Mod Translation Toolkit useful and want to support its development:
+### Placeholder repair
 
-[![Ko-fi](https://ko-fi.com/img/githubbutton_sm.svg)](http://ko-fi.com/drizztgaming)
+When placeholder problems are detected, the user can:
+- repair manually with problematic rows highlighted,
+- repair all detected issues automatically,
+- review every proposed repair one by one with Yes / No confirmation.

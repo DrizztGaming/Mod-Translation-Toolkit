@@ -1,5 +1,40 @@
 # Changelog
 
+## 0.1.8 - 2026-08-01
+
+### Added
+- Automatic Steam Workshop description generation in BBCode.
+- Generated description includes Description, Requirements, Original Mod, Credits, Mod Translation Toolkit attribution and Support sections.
+- GitHub project link is included automatically.
+- Ko-fi support link is included automatically.
+- Added a `Copy Workshop description` button after generating a translation mod.
+- Workshop description is saved as `SteamWorkshopDescription.txt` inside the generated translation mod.
+
+## 0.1.7 - 2026-08-01
+
+### Added
+- Generated translation mods now contain permanent attribution in `About/About.xml`.
+- The description explicitly states that the translation was created with Mod Translation Toolkit.
+- The generated description links to: https://github.com/DrizztGaming/Mod-Translation-Toolkit
+- Attribution is intentionally always enabled.
+
+## 0.1.6 - 2026-08-01
+
+### Added
+- Optional reuse of the original mod `About/Preview.png`.
+- Optional language-flag overlay for generated translation mods.
+- Included flag presets: Polish, UK/English, German, French, Spanish, Italian, Czech, Ukrainian, Japanese, Korean, Chinese and Portuguese.
+- Preview is generated directly by the toolkit without external flag-image files.
+
+## 0.1.5 - 2026-08-01
+
+### Added
+- Placeholder repair workflow.
+- Manual mode highlights problematic rows only.
+- Automatic mode can repair all detected placeholder issues at once.
+- Review mode presents each proposed fix one by one with Yes / No confirmation.
+- Build workflow offers placeholder repair before generating a translation mod.
+
 ## 0.1.4 - 2026-08-01
 
 ### Fixed
