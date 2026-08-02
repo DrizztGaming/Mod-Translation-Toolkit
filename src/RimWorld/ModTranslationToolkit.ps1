@@ -7,7 +7,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-$AppVersion = "0.3.8"
+$AppVersion = "0.4.3"
 $script:UiLanguage = "pl"
 $script:Entries = New-Object System.Collections.ArrayList
 $script:Mods = New-Object System.Collections.ArrayList
@@ -31,6 +31,19 @@ $script:UpdateTranslationPath = ""
 $script:UpdateOriginalPath = ""
 $script:UpdateStats = $null
 $script:SearchFilteredEntries = @()
+$script:KeybindDiagnostics = New-Object System.Collections.ArrayList
+$script:KeybindDefCount = 0
+$script:AssemblyDiagnostics = New-Object System.Collections.ArrayList
+$script:AssemblyDiagnosticFiles = 0
+$script:AssemblyDiagnosticsScannedPath = ""
+
+$script:KeybindLocalizableCount = 0
+$script:WorkshopItems = New-Object System.Collections.ArrayList
+$script:CreatorProfile = [ordered]@{
+    CreatorName = ""
+    SteamProfile = ""
+}
+
 $script:SelectedContentVersion = ""
 $script:EntryKeys = @{}
 $script:KenshiEntries = New-Object System.Collections.ArrayList
@@ -603,6 +616,346 @@ function Get-DefRoots([string]$modPath) {
     }
 
     return @($roots)
+}
+
+
+
+function Get-PrintableStringsFromBytes([byte[]]$bytes, [int]$minLength = 4) {
+    $results = New-Object System.Collections.ArrayList
+
+    # ASCII / UTF-8-ish printable runs
+    $sb = New-Object System.Text.StringBuilder
+    foreach ($b in $bytes) {
+        if (($b -ge 32 -and $b -le 126) -or $b -eq 9) {
+            [void]$sb.Append([char]$b)
+        } else {
+            if ($sb.Length -ge $minLength) {
+                [void]$results.Add($sb.ToString())
+            }
+            [void]$sb.Clear()
+        }
+    }
+    if ($sb.Length -ge $minLength) {
+        [void]$results.Add($sb.ToString())
+    }
+
+    # UTF-16LE printable runs
+    $sb2 = New-Object System.Text.StringBuilder
+    for ($i = 0; $i -lt ($bytes.Length - 1); $i += 2) {
+        $lo = $bytes[$i]
+        $hi = $bytes[$i + 1]
+
+        if ($hi -eq 0 -and $lo -ge 32 -and $lo -le 126) {
+            [void]$sb2.Append([char]$lo)
+        } else {
+            if ($sb2.Length -ge $minLength) {
+                [void]$results.Add($sb2.ToString())
+            }
+            [void]$sb2.Clear()
+        }
+    }
+    if ($sb2.Length -ge $minLength) {
+        [void]$results.Add($sb2.ToString())
+    }
+
+    return @($results | Select-Object -Unique)
+}
+
+function Get-AssemblyUiKeywords {
+    return @(
+        "Hotkey",
+        "KeyBindingDef",
+        "KeyBindingDefOf",
+        "Tooltip",
+        "TooltipHandler",
+        "Gizmo",
+        "Command",
+        "Widgets",
+        "FloatMenuOption",
+        "MouseoverSounds",
+        "Translate",
+        "TaggedString",
+        "DoTimeControlsGUI",
+        "Prefix",
+        "Postfix",
+        "Transpiler",
+        "HarmonyPatch"
+    )
+}
+
+
+function Get-ActiveAssemblyDirectories([string]$modPath) {
+    $dirs = New-Object System.Collections.ArrayList
+
+    $rootAssemblies = Join-Path $modPath "Assemblies"
+    if (Test-Path $rootAssemblies) {
+        [void]$dirs.Add($rootAssemblies)
+    }
+
+    # Prefer version folders resolved by the same profile logic as Def scanning.
+    try {
+        $preferredVersion = Get-PreferredVersionFolder $modPath
+        if (-not [string]::IsNullOrWhiteSpace([string]$preferredVersion)) {
+            $candidate = Join-Path $preferredVersion "Assemblies"
+            if (Test-Path $candidate) {
+                [void]$dirs.Add($candidate)
+            }
+        }
+    } catch {}
+
+    # Fallback: newest numeric version folder only.
+    if ($dirs.Count -eq 0) {
+        $versionDirs = @(
+            Get-ChildItem -LiteralPath $modPath -Directory -ErrorAction SilentlyContinue |
+            Where-Object {
+                $_.Name -match '^\d+(\.\d+)+$' -and
+                (Test-Path (Join-Path $_.FullName "Assemblies"))
+            } |
+            Sort-Object {
+                try { [version]$_.Name } catch { [version]"0.0" }
+            } -Descending
+        )
+        if ($versionDirs.Count -gt 0) {
+            [void]$dirs.Add((Join-Path $versionDirs[0].FullName "Assemblies"))
+        }
+    }
+
+    return @($dirs | Select-Object -Unique)
+}
+
+function Test-SkipDiagnosticAssembly([string]$fileName) {
+    if ([string]::IsNullOrWhiteSpace($fileName)) { return $true }
+
+    $n = $fileName.ToLowerInvariant()
+    $skipNames = @(
+        "0harmony.dll",
+        "harmony.dll",
+        "harmonymod.dll",
+        "hugslib.dll",
+        "newtonsoft.json.dll",
+        "system.runtime.compilerservices.unsafe.dll"
+    )
+
+    if ($skipNames -contains $n) { return $true }
+    if ($n -match '^(system\.|microsoft\.|mono\.|unityengine\.|unity\.|netstandard)') { return $true }
+
+    return $false
+}
+
+function Scan-AssemblyUiDiagnostics([string]$modPath) {
+    $script:AssemblyDiagnostics.Clear()
+    $script:AssemblyDiagnosticFiles = 0
+
+    $assemblyDirs = @(Get-ActiveAssemblyDirectories $modPath)
+
+    $seen = @{}
+    foreach ($dir in @($assemblyDirs)) {
+        Get-ChildItem -LiteralPath $dir -Filter *.dll -File -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+            $dll = $_
+            if (Test-SkipDiagnosticAssembly $dll.Name) { return }
+            $norm = $dll.FullName.ToLowerInvariant()
+            if ($seen.ContainsKey($norm)) { return }
+            $seen[$norm] = $true
+            $script:AssemblyDiagnosticFiles++
+
+            try {
+                $bytes = [System.IO.File]::ReadAllBytes($dll.FullName)
+                $strings = @(Get-PrintableStringsFromBytes $bytes 4)
+                $hits = New-Object System.Collections.ArrayList
+
+                foreach ($keyword in @(Get-AssemblyUiKeywords)) {
+                    foreach ($s in $strings) {
+                        if ($s.IndexOf($keyword, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+                            [void]$hits.Add([pscustomobject]@{
+                                Keyword = $keyword
+                                Text = $s
+                            })
+                        }
+                    }
+                }
+
+                if ($hits.Count -gt 0) {
+                    $rel = ""
+                    try { $rel = $dll.FullName.Substring($modPath.Length).TrimStart('\','/') }
+                    catch { $rel = $dll.Name }
+
+                    # Keep only a compact set of unique evidence lines.
+                    $unique = @(
+                        $hits |
+                        Group-Object Keyword,Text |
+                        ForEach-Object { $_.Group[0] } |
+                        Select-Object -First 40
+                    )
+
+                    [void]$script:AssemblyDiagnostics.Add([pscustomobject]@{
+                        File = $rel
+                        Hits = $unique
+                    })
+                }
+            } catch {}
+        }
+    }
+
+    $script:AssemblyDiagnosticsScannedPath = $modPath
+
+    return [pscustomobject]@{
+        Files = $script:AssemblyDiagnosticFiles
+        Matches = $script:AssemblyDiagnostics.Count
+    }
+}
+
+function Get-AssemblyDiagnosticsText {
+    $isEn = ($script:UiLanguage -eq "en")
+
+    if ($script:AssemblyDiagnosticFiles -eq 0) {
+        if ($isEn) { return "No DLL files were found in the active Assemblies folder." }
+        return "Nie znaleziono plików DLL w aktywnym folderze Assemblies."
+    }
+
+    if ($script:AssemblyDiagnostics.Count -eq 0) {
+        if ($isEn) {
+            return "DLL files scanned: $($script:AssemblyDiagnosticFiles). No characteristic UI/translation references or strings were found."
+        }
+        return "Przeskanowano DLL: $($script:AssemblyDiagnosticFiles). Nie znaleziono charakterystycznych odwołań/stringów UI lub tłumaczeń."
+    }
+
+    $sb = New-Object System.Text.StringBuilder
+
+    if ($isEn) {
+        [void]$sb.AppendLine("DLL files scanned: $($script:AssemblyDiagnosticFiles)")
+        [void]$sb.AppendLine("DLLs with potential UI references: $($script:AssemblyDiagnostics.Count)")
+    } else {
+        [void]$sb.AppendLine("Przeskanowano DLL: $($script:AssemblyDiagnosticFiles)")
+        [void]$sb.AppendLine("DLL z potencjalnymi odwołaniami UI: $($script:AssemblyDiagnostics.Count)")
+    }
+
+    [void]$sb.AppendLine("")
+
+    foreach ($entry in @($script:AssemblyDiagnostics)) {
+        [void]$sb.AppendLine("[$($entry.File)]")
+
+        foreach ($hit in @($entry.Hits)) {
+            $display = [string]$hit.Text
+            if ($display.Length -gt 180) {
+                $display = $display.Substring(0,180) + "..."
+            }
+            [void]$sb.AppendLine("• $($hit.Keyword): $display")
+        }
+
+        [void]$sb.AppendLine("")
+    }
+
+    if ($isEn) {
+        [void]$sb.AppendLine("How to read this report:")
+        [void]$sb.AppendLine("• Tooltip / TooltipHandler / Widgets / Gizmo / Command — the assembly creates or modifies visible UI.")
+        [void]$sb.AppendLine("• Translate / TaggedString — the code uses RimWorld's localization API somewhere in the assembly.")
+        [void]$sb.AppendLine("• HarmonyPatch / Prefix / Postfix / Transpiler — the mod patches existing RimWorld or mod code.")
+        [void]$sb.AppendLine("• DoTimeControlsGUI and similar method names — useful clues about which game screen or UI element is being changed.")
+        [void]$sb.AppendLine("")
+        [void]$sb.AppendLine("Interpretation:")
+        [void]$sb.AppendLine("Several UI + Harmony markers together strongly suggest that some visible text may be generated or modified in code.")
+        [void]$sb.AppendLine("That does NOT automatically mean the text is hardcoded, and it does not prove that a normal language file can replace it.")
+        [void]$sb.AppendLine("")
+        [void]$sb.AppendLine("Toolkit diagnostics are read-only. Assemblies are never patched.")
+    } else {
+        [void]$sb.AppendLine("Jak czytać ten raport:")
+        [void]$sb.AppendLine("• Tooltip / TooltipHandler / Widgets / Gizmo / Command — DLL tworzy lub modyfikuje widoczny interfejs.")
+        [void]$sb.AppendLine("• Translate / TaggedString — kod korzysta gdzieś z systemu lokalizacji RimWorlda.")
+        [void]$sb.AppendLine("• HarmonyPatch / Prefix / Postfix / Transpiler — mod patchuje istniejący kod gry lub innego moda.")
+        [void]$sb.AppendLine("• DoTimeControlsGUI i podobne nazwy metod — wskazują, jaki ekran lub element UI jest modyfikowany.")
+        [void]$sb.AppendLine("")
+        [void]$sb.AppendLine("Interpretacja:")
+        [void]$sb.AppendLine("Kilka sygnałów UI + Harmony naraz mocno sugeruje, że część widocznego tekstu może być generowana lub zmieniana w kodzie.")
+        [void]$sb.AppendLine("Nie oznacza to automatycznie tekstu hardcoded i nie gwarantuje, że zwykły plik językowy może go zastąpić.")
+        [void]$sb.AppendLine("")
+        [void]$sb.AppendLine("Diagnostyka Toolkita jest tylko do odczytu. DLL nigdy nie są patchowane.")
+    }
+
+    return $sb.ToString()
+}
+
+function Scan-KeyBindingDefs([string]$modPath) {
+    $script:KeybindDiagnostics.Clear()
+    $script:KeybindDefCount = 0
+    $script:KeybindLocalizableCount = 0
+
+    $roots = @(Get-DefRoots $modPath)
+
+    foreach ($defs in $roots) {
+        if (-not (Test-Path $defs)) { continue }
+
+        Get-ChildItem -LiteralPath $defs -Recurse -Filter *.xml -File -ErrorAction SilentlyContinue | ForEach-Object {
+            $file = $_
+            try {
+                [xml]$doc = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8
+                if ($null -eq $doc.DocumentElement -or $doc.DocumentElement.Name -ne "Defs") { return }
+
+                foreach ($def in $doc.DocumentElement.ChildNodes) {
+                    if ($def.NodeType -ne [System.Xml.XmlNodeType]::Element) { continue }
+                    if ($def.Name -ne "KeyBindingDef") { continue }
+
+                    $defNameNode = $def.SelectSingleNode("defName")
+                    if ($null -eq $defNameNode -or [string]::IsNullOrWhiteSpace($defNameNode.InnerText)) { continue }
+
+                    $script:KeybindDefCount++
+                    $defName = $defNameNode.InnerText.Trim()
+
+                    $labelNode = $def.SelectSingleNode("label")
+                    $descNode = $def.SelectSingleNode("description")
+
+                    $hasLabel = ($null -ne $labelNode -and -not [string]::IsNullOrWhiteSpace($labelNode.InnerText))
+                    $hasDesc = ($null -ne $descNode -and -not [string]::IsNullOrWhiteSpace($descNode.InnerText))
+
+                    if ($hasLabel -or $hasDesc) {
+                        $script:KeybindLocalizableCount++
+
+                        # Scan-Defs already catches these fields. The diagnostics pass
+                        # deliberately doesn't duplicate translation entries.
+                        continue
+                    }
+
+                    $rel = ""
+                    try { $rel = $file.FullName.Substring($defs.Length).TrimStart('\','/') } catch { $rel = $file.Name }
+
+                    [void]$script:KeybindDiagnostics.Add([pscustomobject]@{
+                        DefName = $defName
+                        File = $rel
+                        Issue = "No label/description"
+                        Explanation = "KeyBindingDef exists but exposes no label or description in Defs. Any visible Hotkey/keybind text may be generated by RimWorld UI or by code and cannot be translated through this Def alone."
+                    })
+                }
+            } catch {}
+        }
+    }
+
+    return [pscustomobject]@{
+        Total = $script:KeybindDefCount
+        Localizable = $script:KeybindLocalizableCount
+        Diagnostic = $script:KeybindDiagnostics.Count
+    }
+}
+
+function Get-KeybindDiagnosticsText {
+    if ($script:KeybindDefCount -eq 0) {
+        return "Nie wykryto KeyBindingDef w tym modzie."
+    }
+
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendLine("KeyBindingDef: $($script:KeybindDefCount)")
+    [void]$sb.AppendLine("Z własnym label/description: $($script:KeybindLocalizableCount)")
+    [void]$sb.AppendLine("Do diagnostyki UI: $($script:KeybindDiagnostics.Count)")
+    [void]$sb.AppendLine("")
+
+    if ($script:KeybindDiagnostics.Count -gt 0) {
+        [void]$sb.AppendLine("Potencjalnie generowane przez RimWorld UI / kod moda:")
+        foreach ($d in @($script:KeybindDiagnostics)) {
+            [void]$sb.AppendLine("• $($d.DefName)  [$($d.File)]")
+        }
+        [void]$sb.AppendLine("")
+        [void]$sb.AppendLine("Brak label/description nie oznacza błędu moda. Oznacza tylko, że Toolkit nie ma zwykłego pola DefInjected do przetłumaczenia.")
+    }
+
+    return $sb.ToString()
 }
 
 function Scan-Defs([string]$modPath) {
@@ -1317,6 +1670,7 @@ function Load-RimWorldModPath([string]$path, [switch]$Silent) {
 
         $txtModPath.Text = $path
         $scan = Analyze-Mod $path
+        Apply-CreatorProfileToTranslator
         Refresh-LanguageCoverageUi
         $txtStatus.Text = "Załadowano folder moda. Wpisy: $($scan.Total). Automatycznie podstawiono istniejących: $($scan.AutoLoadedExisting)."
         return $scan
@@ -1370,6 +1724,13 @@ function Analyze-Mod([string]$modPath) {
     # A mod may provide only some strings in Keyed while keeping Def labels/descriptions in Defs.
     $langCount = Scan-EnglishLanguages $modPath
     $defsCount = Scan-Defs $modPath
+    $keybindScan = Scan-KeyBindingDefs $modPath
+
+    # DLL/UI diagnostics are intentionally lazy and run only on button press.
+    $script:AssemblyDiagnostics.Clear()
+    $script:AssemblyDiagnosticFiles = 0
+    $script:AssemblyDiagnosticsScannedPath = ""
+
     if ($defsCount -gt 0) { $script:DetectedFromDefs = $true }
 
     $txtModName.Text = $script:OriginalModName
@@ -1386,6 +1747,11 @@ function Analyze-Mod([string]$modPath) {
         PolishCoverage = $script:LanguageCoverage["pl"]
         EnglishCoverage = $script:LanguageCoverage["en"]
         AutoLoadedExisting = $autoLoaded
+        KeyBindingDefs = $keybindScan.Total
+        KeyBindingLocalizable = $keybindScan.Localizable
+        KeyBindingDiagnostics = $keybindScan.Diagnostic
+        AssemblyFiles = 0
+        AssemblyUiDiagnostics = 0
     }
 }
 
@@ -2615,11 +2981,249 @@ function Set-ClipboardTextSafe([string]$text, [int]$maxAttempts = 8, [int]$delay
     }
 }
 
+
+# ---------- Steam Workshop dashboard ----------
+function Get-MttDataFolder {
+    $dir = Join-Path $env:APPDATA "ModTranslationToolkit"
+    if (-not (Test-Path $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+    return $dir
+}
+
+function Get-WorkshopProfilePath {
+    return (Join-Path (Get-MttDataFolder) "workshop-profile.json")
+}
+
+function Load-WorkshopProfile {
+    $path = Get-WorkshopProfilePath
+    if (-not (Test-Path $path)) { return }
+
+    try {
+        $data = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+
+        $script:CreatorProfile.CreatorName = [string]$data.creatorName
+        $script:CreatorProfile.SteamProfile = [string]$data.steamProfile
+
+        $script:WorkshopItems.Clear()
+        foreach ($item in @($data.items)) {
+            if ($null -eq $item) { continue }
+
+            [void]$script:WorkshopItems.Add([pscustomobject]@{
+                PublishedFileId = [string]$item.publishedFileId
+                Title = [string]$item.title
+                AppId = [string]$item.appId
+                Owner = [string]$item.owner
+                Subscriptions = [int64]$item.subscriptions
+                Favorites = [int64]$item.favorites
+                Views = [int64]$item.views
+                FileSize = [int64]$item.fileSize
+                TimeCreated = [string]$item.timeCreated
+                TimeUpdated = [string]$item.timeUpdated
+                Url = [string]$item.url
+                LastRefresh = [string]$item.lastRefresh
+            })
+        }
+    } catch {}
+}
+
+function Save-WorkshopProfile {
+    $items = @()
+    foreach ($item in @($script:WorkshopItems)) {
+        $items += [ordered]@{
+            publishedFileId = [string]$item.PublishedFileId
+            title = [string]$item.Title
+            appId = [string]$item.AppId
+            owner = [string]$item.Owner
+            subscriptions = [int64]$item.Subscriptions
+            favorites = [int64]$item.Favorites
+            views = [int64]$item.Views
+            fileSize = [int64]$item.FileSize
+            timeCreated = [string]$item.TimeCreated
+            timeUpdated = [string]$item.TimeUpdated
+            url = [string]$item.Url
+            lastRefresh = [string]$item.LastRefresh
+        }
+    }
+
+    $data = [ordered]@{
+        creatorName = [string]$script:CreatorProfile.CreatorName
+        steamProfile = [string]$script:CreatorProfile.SteamProfile
+        items = $items
+    }
+
+    $json = $data | ConvertTo-Json -Depth 6
+    [System.IO.File]::WriteAllText(
+        (Get-WorkshopProfilePath),
+        $json,
+        (New-Object System.Text.UTF8Encoding($false))
+    )
+}
+
+function Get-PublishedFileIdFromInput([string]$value) {
+    if ([string]::IsNullOrWhiteSpace($value)) { return "" }
+
+    $v = $value.Trim()
+
+    if ($v -match '^\d{5,}$') {
+        return $v
+    }
+
+    $m = [regex]::Match($v, '[?&]id=(\d+)')
+    if ($m.Success) {
+        return $m.Groups[1].Value
+    }
+
+    $m = [regex]::Match($v, '/filedetails/\?id=(\d+)')
+    if ($m.Success) {
+        return $m.Groups[1].Value
+    }
+
+    return ""
+}
+
+function Convert-UnixToLocalString($unix) {
+    try {
+        if ([int64]$unix -le 0) { return "" }
+        return [DateTimeOffset]::FromUnixTimeSeconds([int64]$unix).LocalDateTime.ToString("yyyy-MM-dd HH:mm")
+    } catch {
+        return ""
+    }
+}
+
+function Get-WorkshopPublishedFileDetails([string]$publishedFileId) {
+    if ([string]::IsNullOrWhiteSpace($publishedFileId)) {
+        throw "Brak PublishedFileID."
+    }
+
+    $uri = "https://api.steampowered.com/ISteamRemoteStorage/GetPublishedFileDetails/v1/"
+    $body = @{
+        itemcount = 1
+        "publishedfileids[0]" = $publishedFileId
+    }
+
+    $response = Invoke-RestMethod -Uri $uri -Method Post -Body $body -TimeoutSec 20
+    $detail = $response.response.publishedfiledetails | Select-Object -First 1
+
+    if ($null -eq $detail) {
+        throw "Steam nie zwrócił szczegółów dla PublishedFileID $publishedFileId."
+    }
+
+    if ([string]$detail.result -ne "1") {
+        throw "Steam zwrócił błąd dla PublishedFileID $publishedFileId (result: $($detail.result))."
+    }
+
+    $views = 0
+    if ($null -ne $detail.views) { $views = [int64]$detail.views }
+
+    $subs = 0
+    if ($null -ne $detail.subscriptions) { $subs = [int64]$detail.subscriptions }
+
+    $favs = 0
+    if ($null -ne $detail.favorited) { $favs = [int64]$detail.favorited }
+    elseif ($null -ne $detail.favorites) { $favs = [int64]$detail.favorites }
+
+    return [pscustomobject]@{
+        PublishedFileId = [string]$detail.publishedfileid
+        Title = [string]$detail.title
+        AppId = [string]$detail.consumer_app_id
+        Owner = [string]$detail.creator
+        Subscriptions = $subs
+        Favorites = $favs
+        Views = $views
+        FileSize = [int64]$detail.file_size
+        TimeCreated = Convert-UnixToLocalString $detail.time_created
+        TimeUpdated = Convert-UnixToLocalString $detail.time_updated
+        Url = "https://steamcommunity.com/sharedfiles/filedetails/?id=$($detail.publishedfileid)"
+        LastRefresh = (Get-Date).ToString("yyyy-MM-dd HH:mm")
+    }
+}
+
+function Find-WorkshopItemIndex([string]$publishedFileId) {
+    for ($i = 0; $i -lt $script:WorkshopItems.Count; $i++) {
+        if ([string]$script:WorkshopItems[$i].PublishedFileId -eq $publishedFileId) {
+            return $i
+        }
+    }
+    return -1
+}
+
+function Add-OrUpdateWorkshopItem([string]$inputValue) {
+    $id = Get-PublishedFileIdFromInput $inputValue
+    if ([string]::IsNullOrWhiteSpace($id)) {
+        throw "Nie rozpoznano linku Workshop ani PublishedFileID."
+    }
+
+    $detail = Get-WorkshopPublishedFileDetails $id
+    $index = Find-WorkshopItemIndex $id
+
+    if ($index -ge 0) {
+        $script:WorkshopItems[$index] = $detail
+    } else {
+        [void]$script:WorkshopItems.Add($detail)
+    }
+
+    Save-WorkshopProfile
+    Refresh-WorkshopGrid
+    return $detail
+}
+
+function Refresh-WorkshopGrid {
+    if ($null -eq $workshopGrid) { return }
+
+    $workshopGrid.ItemsSource = $null
+    $workshopGrid.ItemsSource = @($script:WorkshopItems)
+
+    $count = $script:WorkshopItems.Count
+    $subscriptions = 0
+    $favorites = 0
+    $views = 0
+
+    foreach ($item in @($script:WorkshopItems)) {
+        $subscriptions += [int64]$item.Subscriptions
+        $favorites += [int64]$item.Favorites
+        $views += [int64]$item.Views
+    }
+
+    $lblWorkshopItems.Content = "Publikacje: $count"
+    $lblWorkshopSubscriptions.Content = "Subskrypcje: $subscriptions"
+    $lblWorkshopFavorites.Content = "Ulubione: $favorites"
+    $lblWorkshopViews.Content = "Wyświetlenia: $views"
+}
+
+function Refresh-AllWorkshopItems {
+    $ids = @($script:WorkshopItems | ForEach-Object { [string]$_.PublishedFileId })
+    $done = 0
+
+    foreach ($id in $ids) {
+        try {
+            $detail = Get-WorkshopPublishedFileDetails $id
+            $index = Find-WorkshopItemIndex $id
+            if ($index -ge 0) {
+                $script:WorkshopItems[$index] = $detail
+            }
+            $done++
+            Refresh-WorkshopGrid
+            [System.Windows.Forms.Application]::DoEvents()
+        } catch {}
+    }
+
+    Save-WorkshopProfile
+    return $done
+}
+
+function Apply-CreatorProfileToTranslator {
+    $name = [string]$script:CreatorProfile.CreatorName
+    if (-not [string]::IsNullOrWhiteSpace($name)) {
+        $txtTranslator.Text = $name
+    }
+}
+
 # ---------- Dark / Mrokar purple UI ----------
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Mod Translation Toolkit v0.3.8"
+        Title="Mod Translation Toolkit v0.4.3"
         Height="840" Width="1260"
         WindowStartupLocation="CenterScreen"
         Background="#121018"
@@ -2757,7 +3361,7 @@ function Set-ClipboardTextSafe([string]$text, [int]$maxAttempts = 8, [int]$delay
           <TextBlock Text="RimWorld profile • dark Mrokar theme" Foreground="#AFA2C0" FontSize="12"/>
         </StackPanel>
         <Border Grid.Column="1" Background="#2B2038" CornerRadius="5" Padding="10,5" VerticalAlignment="Center">
-          <TextBlock Text="v0.3.8" Foreground="#CDA8F2" FontWeight="SemiBold"/>
+          <TextBlock Text="v0.4.3" Foreground="#CDA8F2" FontWeight="SemiBold"/>
         </Border>
       </Grid>
     </Border>
@@ -2833,6 +3437,8 @@ function Set-ClipboardTextSafe([string]$text, [int]$maxAttempts = 8, [int]$delay
             </ComboBox>
             <Button Name="btnAutoTranslate" Content="Tłumacz brakujące"/>
             <Button Name="btnValidate" Content="Sprawdź / napraw placeholdery"/>
+            <Button Name="btnKeybindDiagnostics" Content="Diagnostyka skrótów"/>
+            <Button Name="btnAssemblyDiagnostics" Content="Diagnostyka DLL/UI"/>
             <Button Name="btnBuild" Content="Zbuduj oddzielny mod"/>
             <Button Name="btnCopyWorkshop" Content="Kopiuj opis Workshop" IsEnabled="False"/>
             <Label Name="lblCount" Content="Wpisy: 0" VerticalContentAlignment="Center"/>
@@ -2939,6 +3545,81 @@ function Set-ClipboardTextSafe([string]$text, [int]$maxAttempts = 8, [int]$delay
         </Grid>
       </TabItem>
 
+      <TabItem Name="tabWorkshop" Header="Workshop">
+        <Grid Margin="12" Background="{StaticResource Bg}">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
+
+          <Border Grid.Row="0" Background="#211A2B" BorderBrush="#4A385D" BorderThickness="1"
+                  CornerRadius="6" Padding="12" Margin="0,0,0,10">
+            <Grid>
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="260"/>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="Auto"/>
+              </Grid.ColumnDefinitions>
+
+              <TextBlock Grid.Column="0" Text="Nazwa kreatora:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+              <TextBox Grid.Column="1" Name="txtCreatorName" Margin="0,0,12,0"
+                       ToolTip="Nazwa używana jako autor tłumaczeń."/>
+              <TextBlock Grid.Column="2" Text="SteamID / profil:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+              <TextBox Grid.Column="3" Name="txtSteamProfile" Margin="0,0,12,0"
+                       ToolTip="Opcjonalny SteamID64 lub link do profilu Steam."/>
+              <Button Grid.Column="4" Name="btnSaveCreatorProfile" Content="Zapisz profil"/>
+            </Grid>
+          </Border>
+
+          <WrapPanel Grid.Row="1" Margin="0,0,0,10">
+            <TextBox Name="txtWorkshopItemInput" Width="430" Margin="0,0,8,0"
+                     ToolTip="Wklej link do przedmiotu Workshop albo PublishedFileID."/>
+            <Button Name="btnAddWorkshopItem" Content="Dodaj publikację"/>
+            <Button Name="btnRefreshWorkshop" Content="Odśwież statystyki"/>
+            <Button Name="btnRemoveWorkshopItem" Content="Usuń z listy"/>
+            <Button Name="btnOpenWorkshopItem" Content="Otwórz Workshop"/>
+          </WrapPanel>
+
+          <WrapPanel Grid.Row="2" Margin="0,0,0,10">
+            <Border Background="#2B2138" CornerRadius="5" Padding="10,5" Margin="0,0,8,0">
+              <Label Name="lblWorkshopItems" Content="Publikacje: 0"/>
+            </Border>
+            <Border Background="#2B2138" CornerRadius="5" Padding="10,5" Margin="0,0,8,0">
+              <Label Name="lblWorkshopSubscriptions" Content="Subskrypcje: 0"/>
+            </Border>
+            <Border Background="#2B2138" CornerRadius="5" Padding="10,5" Margin="0,0,8,0">
+              <Label Name="lblWorkshopFavorites" Content="Ulubione: 0"/>
+            </Border>
+            <Border Background="#2B2138" CornerRadius="5" Padding="10,5">
+              <Label Name="lblWorkshopViews" Content="Wyświetlenia: 0"/>
+            </Border>
+          </WrapPanel>
+
+          <DataGrid Grid.Row="3" Name="workshopGrid" AutoGenerateColumns="False"
+                    CanUserAddRows="False" SelectionMode="Single" IsReadOnly="True">
+            <DataGrid.Columns>
+              <DataGridTextColumn Header="Tytuł" Binding="{Binding Title}" Width="*"/>
+              <DataGridTextColumn Header="PublishedFileID" Binding="{Binding PublishedFileId}" Width="150"/>
+              <DataGridTextColumn Header="AppID" Binding="{Binding AppId}" Width="85"/>
+              <DataGridTextColumn Header="Subskrypcje" Binding="{Binding Subscriptions}" Width="100"/>
+              <DataGridTextColumn Header="Ulubione" Binding="{Binding Favorites}" Width="85"/>
+              <DataGridTextColumn Header="Wyświetlenia" Binding="{Binding Views}" Width="100"/>
+              <DataGridTextColumn Header="Aktualizacja Workshop" Binding="{Binding TimeUpdated}" Width="150"/>
+              <DataGridTextColumn Header="Odświeżono" Binding="{Binding LastRefresh}" Width="135"/>
+            </DataGrid.Columns>
+          </DataGrid>
+
+          <TextBlock Grid.Row="4" Name="txtWorkshopStatus" Margin="0,10,0,0" TextWrapping="Wrap"
+                     Foreground="#B9AEC9"
+                     Text="Dodaj publikacje przez link Workshop lub PublishedFileID. Toolkit nie przechowuje hasła Steam ani publisher API key."/>
+        </Grid>
+      </TabItem>
+
       <TabItem Name="tabKenshi" Header="Kenshi">
         <Grid Margin="12" Background="{StaticResource Bg}">
           <Grid.RowDefinitions>
@@ -3038,7 +3719,10 @@ $names = @(
     "txtModPath","txtModName","txtPackageId","txtAuthor","grid","lblCount","txtStatus",
     "btnDetect","txtSearch","lblMods","modsGrid","btnUseSelected","btnOpenFolder","btnOpenCurrentFolder","cmbSourceLang","cmbTargetLang","lblSourceLang","lblTargetLang","tabTranslation","tabInstalledMods","tabGameProfiles","chkPreviewFlag","cmbPreviewFlag","btnCopyWorkshop","lblCoverageTitle","txtCoveragePL","txtCoverageEN","btnLoadExistingPL","btnLoadExistingEN","tabKenshi","btnOpenKenshiProfile","btnDetectKenshi","btnChooseKenshi","txtKenshiPath","btnOpenKenshiFolder","btnScanKenshi","btnTranslateKenshi","btnExportKenshiCsv","btnImportKenshiCsv","btnFcsHelpKenshi","btnBuildKenshi","lblKenshiCount","kenshiGrid","txtKenshiStatus",
   "btnUpdateExisting",
-  "lblSearchTitle","txtSearchTerm","cmbSearchScope","btnClearSearch","lblReplaceTitle","txtReplaceTerm","btnReplaceAll","lblSearchCount"
+  "lblSearchTitle","txtSearchTerm","cmbSearchScope","btnClearSearch","lblReplaceTitle","txtReplaceTerm","btnReplaceAll","lblSearchCount",
+  "tabWorkshop","txtCreatorName","txtSteamProfile","btnSaveCreatorProfile","txtWorkshopItemInput","btnAddWorkshopItem","btnRefreshWorkshop","btnRemoveWorkshopItem","btnOpenWorkshopItem","lblWorkshopItems","lblWorkshopSubscriptions","lblWorkshopFavorites","lblWorkshopViews","workshopGrid","txtWorkshopStatus",
+  "btnKeybindDiagnostics",
+  "btnAssemblyDiagnostics"
 )
 foreach ($n in $names) { Set-Variable -Name $n -Value $window.FindName($n) }
 
@@ -3091,7 +3775,8 @@ function Apply-UiLanguage {
         $tabTranslation.Header = "Tłumaczenie"
         $tabInstalledMods.Header = "Zainstalowane mody"
         $tabGameProfiles.Header = "Profile gier"
-        $tabKenshi.Header = "Kenshi"
+        $tabWorkshop.Header = "Workshop"
+    $tabKenshi.Header = "Kenshi"
         return
     }
 
@@ -3118,6 +3803,8 @@ function Apply-UiLanguage {
     $btnClearSearch.Content = "Clear"
     $lblReplaceTitle.Text = "New text:"
     $btnReplaceAll.Content = "Replace all"
+    $btnKeybindDiagnostics.Content = "Keybind diagnostics"
+    $btnAssemblyDiagnostics.Content = "DLL/UI diagnostics"
     try {
         $cmbSearchScope.Items[0].Content = "Both"
         $cmbSearchScope.Items[1].Content = "Source"
@@ -3302,6 +3989,104 @@ $btnReplaceAll.Add_Click({
     } else {
         Set-ControlTextSafe $txtStatus "Zmieniono tekst w $count tłumaczeniach."
     }
+})
+
+
+$btnSaveCreatorProfile.Add_Click({
+    $script:CreatorProfile.CreatorName = [string]$txtCreatorName.Text
+    $script:CreatorProfile.SteamProfile = [string]$txtSteamProfile.Text
+    Save-WorkshopProfile
+    Apply-CreatorProfileToTranslator
+    Set-ControlTextSafe $txtWorkshopStatus "Zapisano profil kreatora. Nazwa będzie automatycznie używana jako autor tłumaczenia."
+})
+
+$btnAddWorkshopItem.Add_Click({
+    try {
+        $detail = Add-OrUpdateWorkshopItem ([string]$txtWorkshopItemInput.Text)
+        $txtWorkshopItemInput.Text = ""
+        Set-ControlTextSafe $txtWorkshopStatus "Dodano/odświeżono: $($detail.Title)"
+    } catch {
+        [System.Windows.MessageBox]::Show($_.Exception.Message, "Workshop") | Out-Null
+    }
+})
+
+$btnRefreshWorkshop.Add_Click({
+    if ($script:WorkshopItems.Count -eq 0) { return }
+    $count = Refresh-AllWorkshopItems
+    Set-ControlTextSafe $txtWorkshopStatus "Odświeżono statystyki: $count / $($script:WorkshopItems.Count) publikacji."
+})
+
+$btnRemoveWorkshopItem.Add_Click({
+    $selected = $workshopGrid.SelectedItem
+    if ($null -eq $selected) { return }
+
+    $id = [string]$selected.PublishedFileId
+    $index = Find-WorkshopItemIndex $id
+    if ($index -ge 0) {
+        $script:WorkshopItems.RemoveAt($index)
+        Save-WorkshopProfile
+        Refresh-WorkshopGrid
+        Set-ControlTextSafe $txtWorkshopStatus "Usunięto publikację z lokalnej listy. Nic nie zostało usunięte ze Steam."
+    }
+})
+
+$btnOpenWorkshopItem.Add_Click({
+    $selected = $workshopGrid.SelectedItem
+    if ($null -eq $selected) { return }
+
+    $url = [string]$selected.Url
+    if (-not [string]::IsNullOrWhiteSpace($url)) {
+        Start-Process $url
+    }
+})
+
+$txtWorkshopItemInput.Add_KeyDown({
+    param($sender,$e)
+    if ($e.Key -eq [System.Windows.Input.Key]::Enter) {
+        $btnAddWorkshopItem.RaiseEvent((New-Object System.Windows.RoutedEventArgs([System.Windows.Controls.Button]::ClickEvent)))
+        $e.Handled = $true
+    }
+})
+
+
+
+$btnAssemblyDiagnostics.Add_Click({
+    try {
+        $modPath = [string]$txtModPath.Text
+        if (-not (Test-ExistingFolderSafe $modPath)) {
+            [System.Windows.MessageBox]::Show("Najpierw załaduj mod.","Assembly / UI diagnostics") | Out-Null
+            return
+        }
+
+        Set-ControlTextSafe $txtStatus "Skanowanie DLL/UI..."
+        $btnAssemblyDiagnostics.IsEnabled = $false
+        [System.Windows.Forms.Application]::DoEvents()
+
+        $scan = Scan-AssemblyUiDiagnostics $modPath
+
+        Set-ControlTextSafe $txtStatus "Diagnostyka DLL/UI zakończona. Przeskanowano DLL: $($scan.Files), trafienia: $($scan.Matches)."
+
+        [System.Windows.MessageBox]::Show(
+            (Get-AssemblyDiagnosticsText),
+            "Assembly / UI diagnostics",
+            [System.Windows.MessageBoxButton]::OK,
+            [System.Windows.MessageBoxImage]::Information
+        ) | Out-Null
+    } catch {
+        [System.Windows.MessageBox]::Show($_.Exception.Message, "Assembly / UI diagnostics") | Out-Null
+    } finally {
+        $btnAssemblyDiagnostics.IsEnabled = $true
+    }
+})
+
+$btnKeybindDiagnostics.Add_Click({
+    $message = Get-KeybindDiagnosticsText
+    [System.Windows.MessageBox]::Show(
+        $message,
+        "KeyBindingDef / UI diagnostics",
+        [System.Windows.MessageBoxButton]::OK,
+        [System.Windows.MessageBoxImage]::Information
+    ) | Out-Null
 })
 
 $btnChooseMod.Add_Click({
@@ -3804,8 +4589,9 @@ $btnUseSelected.Add_Click({
 
             $txtModPath.Text = $m.Path
             $scan = Analyze-Mod $m.Path
+            Apply-CreatorProfileToTranslator
             $window.Content.Children[1].SelectedIndex = 0
-            $txtStatus.Text = "Wybrano: $($m.Name). Wpisy: $($scan.Total). Automatycznie podstawiono istniejących: $($scan.AutoLoadedExisting). Oryginał można zaznaczać i kopiować Ctrl+C."
+            $txtStatus.Text = "Wybrano: $($m.Name). Wpisy: $($scan.Total). Automatycznie podstawiono istniejących: $($scan.AutoLoadedExisting). KeyBindingDef: $($scan.KeyBindingDefs), diagnostyka UI: $($scan.KeyBindingDiagnostics). Oryginał można zaznaczać i kopiować Ctrl+C."
             Refresh-LanguageCoverageUi
         }
     } catch {

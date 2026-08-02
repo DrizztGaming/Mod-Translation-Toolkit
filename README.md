@@ -2,12 +2,19 @@
 
 A Windows desktop helper for translating game mods.
 
-> **Current release:** v0.3.8  
+> **Current release:** v0.4.3  
 > **Currently supported game:** RimWorld
 
 The project started as a small RimWorld translation helper and is being prepared as a multi-game toolkit with separate game profiles.
 
 ## Features
+
+- **DLL/UI diagnostics** heuristically scans RimWorld mod assemblies for UI/keybind-related references and strings such as Hotkey, KeyBindingDef, Tooltip, Gizmo, Command, Widgets and Translate.
+- Bilingual manuals (`MANUAL_PL.md`, `MANUAL_EN.md`) are shipped next to the launcher.
+
+- **Keybind/UI diagnostics for RimWorld**: scans `KeyBindingDef`, translates exposed `label`/`description` through the normal DefInjected workflow, and flags keybindings with no localizable label/description as likely UI/code-generated text.
+
+- **Workshop Dashboard**: save a creator profile, automatically reuse the creator name as translation author, track Workshop items by URL/PublishedFileID, refresh public item details, and aggregate subscriptions, favorites and views. No Steam password or publisher API key is stored.
 
 - Translation-table search can filter by source text, translated text or both. Bulk replace can fix a phrase everywhere in translations, or assign one translation to every matching source phrase.
 
