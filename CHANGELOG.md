@@ -1,5 +1,62 @@
 # Changelog
 
+## 0.3.8 - 2026-08-02
+
+### Added
+- Added live search above the RimWorld translation table.
+- Search scope can be **Both**, **Source**, or **Translation**.
+- Search results update immediately while typing.
+- Added **Replace all** for fast terminology corrections.
+- When searching translated text, Replace all performs a case-insensitive substring replacement in matching translations.
+- When searching source text, Replace all assigns the replacement as the translation for every matching source entry.
+- Added result counter showing filtered entries versus total entries.
+
+## 0.3.7 - 2026-08-02
+
+### Fixed
+- Fixed the `.Text` error shown after successfully loading an existing translation for update.
+- Root cause: update mode referenced a non-existent `$txtName` WPF control instead of the real `$txtModName` field.
+- Added a small safe UI text helper as an additional guard for status controls.
+- Translation data loaded before the error was not corrupted.
+
+## 0.3.6 - 2026-08-02
+
+### Fixed
+- Fixed `Cannot bind argument to parameter 'LiteralPath' because it is an empty string` when starting **Update existing translation** with an empty main path field.
+- Added safe folder-path validation for pasted and drag-and-drop paths.
+- Empty path fields are now treated as a normal state instead of being passed directly to `Test-Path`.
+- Applied the same protection to RimWorld, Kenshi and update-workflow path validation.
+
+## 0.3.5 - 2026-08-02
+
+### Fixed
+- Fixed the update-workflow error related to the `Missing` summary property by using an explicit `MissingCount` field and null-safe update summary handling.
+
+### Added
+- RimWorld mod path can now be pasted directly into the path field and loaded with Enter.
+- RimWorld mod folders can be dragged and dropped onto the path field.
+- Kenshi folder supports the same paste/Enter and drag-and-drop workflow.
+- **Update existing translation** now uses path input dialogs where folders can be pasted or dragged in, instead of forcing users through nested folder pickers.
+
+## 0.3.4 - 2026-08-02
+
+### Fixed
+- Fixed the application failing to open after the startup language selection in v0.3.3.
+- Repaired malformed WPF XAML caused by the new **Update existing translation** button.
+- Registered `btnUpdateExisting` correctly without corrupting the existing English-language reload button.
+- Removed a duplicated update-mode reset call.
+
+## 0.3.3 - 2026-08-02
+
+### Added
+- New **Update existing translation** workflow for RimWorld.
+- Select the updated original mod and an existing separate translation mod.
+- Existing translated strings are preserved automatically.
+- New source entries are left empty so only new/missing content needs translation.
+- Obsolete translation entries are counted.
+- Update mode preserves the existing translation folder, `About.xml`, `packageId` and Workshop-related files.
+- The build button changes to **Save translation update** while update mode is active.
+
 ## 0.3.2 - 2026-08-02
 
 ### Fixed

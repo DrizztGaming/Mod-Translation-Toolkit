@@ -7,7 +7,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-$AppVersion = "0.3.2"
+$AppVersion = "0.3.8"
 $script:UiLanguage = "pl"
 $script:Entries = New-Object System.Collections.ArrayList
 $script:Mods = New-Object System.Collections.ArrayList
@@ -26,6 +26,11 @@ $script:ExistingTranslations = @{}
 $script:EditingTranslationModPath = ""
 $script:EditingTranslationPackageId = ""
 $script:EditingTranslationName = ""
+$script:UpdateMode = $false
+$script:UpdateTranslationPath = ""
+$script:UpdateOriginalPath = ""
+$script:UpdateStats = $null
+$script:SearchFilteredEntries = @()
 $script:SelectedContentVersion = ""
 $script:EntryKeys = @{}
 $script:KenshiEntries = New-Object System.Collections.ArrayList
@@ -641,10 +646,95 @@ function Scan-Defs([string]$modPath) {
     return ($script:Entries.Count - $countBefore)
 }
 
-function Refresh-Grid {
+function Get-SearchScopeCode {
+    try {
+        if ($null -ne $cmbSearchScope.SelectedItem) {
+            return [string]$cmbSearchScope.SelectedItem.Tag
+        }
+    } catch {}
+    return "both"
+}
+
+function Get-FilteredTranslationEntries {
+    $term = ""
+    try { $term = [string]$txtSearchTerm.Text } catch {}
+    if ([string]::IsNullOrWhiteSpace($term)) {
+        return @($script:Entries)
+    }
+
+    $scope = Get-SearchScopeCode
+    $needle = $term.ToLowerInvariant()
+
+    return @($script:Entries | Where-Object {
+        $source = ([string]$_.Source).ToLowerInvariant()
+        $translation = ([string]$_.Translation).ToLowerInvariant()
+
+        switch ($scope) {
+            "source" { $source.Contains($needle) }
+            "translation" { $translation.Contains($needle) }
+            default { $source.Contains($needle) -or $translation.Contains($needle) }
+        }
+    })
+}
+
+function Refresh-SearchResults {
+    $script:SearchFilteredEntries = @(Get-FilteredTranslationEntries)
     $grid.ItemsSource = $null
-    $grid.ItemsSource = $script:Entries
-    $lblCount.Content = "Wpisy: $($script:Entries.Count)"
+    $grid.ItemsSource = $script:SearchFilteredEntries
+
+    $total = $script:Entries.Count
+    $shown = $script:SearchFilteredEntries.Count
+    $term = ""
+    try { $term = [string]$txtSearchTerm.Text } catch {}
+
+    if ([string]::IsNullOrWhiteSpace($term)) {
+        $lblCount.Content = "Wpisy: $total"
+        if ($null -ne $lblSearchCount) { $lblSearchCount.Content = "" }
+    } else {
+        $lblCount.Content = "Wpisy: $total"
+        if ($null -ne $lblSearchCount) { $lblSearchCount.Content = "Wyniki: $shown / $total" }
+    }
+}
+
+function Refresh-Grid {
+    Refresh-SearchResults
+}
+
+function Replace-InFilteredTranslations([string]$search, [string]$replacement, [string]$scope) {
+    if ([string]::IsNullOrWhiteSpace($search)) { return 0 }
+
+    $matches = @(Get-FilteredTranslationEntries)
+    $changed = 0
+
+    foreach ($e in $matches) {
+        if ($scope -eq "source") {
+            # Searching the source means the user wants one corrected translation
+            # for every matching source phrase.
+            if ([string]$e.Translation -ne $replacement) {
+                $e.Translation = $replacement
+                $changed++
+            }
+            continue
+        }
+
+        $current = [string]$e.Translation
+        if ([string]::IsNullOrEmpty($current)) { continue }
+
+        $newText = [regex]::Replace(
+            $current,
+            [regex]::Escape($search),
+            [System.Text.RegularExpressions.MatchEvaluator]{ param($m) $replacement },
+            [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+        )
+
+        if ($newText -ne $current) {
+            $e.Translation = $newText
+            $changed++
+        }
+    }
+
+    Refresh-SearchResults
+    return $changed
 }
 
 
@@ -952,6 +1042,7 @@ function Resolve-OriginalModForTranslation($translationInfo, [string]$translatio
 }
 
 function Open-ExistingTranslationMod([string]$translationModPath) {
+    Reset-TranslationUpdateMode
     $t = Get-TranslationModInfo $translationModPath
     if (-not $t.IsTranslationMod) {
         throw "Wybrany mod nie został rozpoznany jako mod tłumaczeniowy."
@@ -1004,6 +1095,266 @@ function Open-ExistingTranslationMod([string]$translationModPath) {
         Total = $script:Entries.Count
         ResolveMethod = $resolved.Method
     }
+}
+
+
+
+function Show-PathInputDialog([string]$title, [string]$prompt, [string]$defaultValue="") {
+    $w = New-Object System.Windows.Window
+    $w.Title = $title
+    $w.Width = 720
+    $w.Height = 180
+    $w.WindowStartupLocation = "CenterOwner"
+    $w.Owner = $window
+    $w.ResizeMode = "NoResize"
+    $w.Background = [System.Windows.Media.Brushes]::White
+
+    $grid = New-Object System.Windows.Controls.Grid
+    $grid.Margin = "12"
+    $r1 = New-Object System.Windows.Controls.RowDefinition
+    $r1.Height = "Auto"
+    $r2 = New-Object System.Windows.Controls.RowDefinition
+    $r2.Height = "*"
+    $r3 = New-Object System.Windows.Controls.RowDefinition
+    $r3.Height = "Auto"
+    [void]$grid.RowDefinitions.Add($r1)
+    [void]$grid.RowDefinitions.Add($r2)
+    [void]$grid.RowDefinitions.Add($r3)
+
+    $lbl = New-Object System.Windows.Controls.TextBlock
+    $lbl.Text = $prompt
+    $lbl.Margin = "0,0,0,8"
+    [System.Windows.Controls.Grid]::SetRow($lbl,0)
+    [void]$grid.Children.Add($lbl)
+
+    $tb = New-Object System.Windows.Controls.TextBox
+    $tb.Text = $defaultValue
+    $tb.AllowDrop = $true
+    $tb.VerticalContentAlignment = "Center"
+    [System.Windows.Controls.Grid]::SetRow($tb,1)
+    [void]$grid.Children.Add($tb)
+
+    $tb.Add_Drop({
+        param($sender,$e)
+        $p = Get-DroppedFolderPath $e
+        if ($p) { $tb.Text = $p; $e.Handled = $true }
+    })
+    $tb.Add_PreviewDragOver({
+        param($sender,$e)
+        $e.Effects = [System.Windows.DragDropEffects]::Copy
+        $e.Handled = $true
+    })
+
+    $panel = New-Object System.Windows.Controls.StackPanel
+    $panel.Orientation = "Horizontal"
+    $panel.HorizontalAlignment = "Right"
+    $panel.Margin = "0,10,0,0"
+
+    $ok = New-Object System.Windows.Controls.Button
+    $ok.Content = "OK"
+    $ok.Width = 90
+    $ok.Margin = "0,0,8,0"
+
+    $cancel = New-Object System.Windows.Controls.Button
+    $cancel.Content = "Anuluj"
+    $cancel.Width = 90
+
+    [void]$panel.Children.Add($ok)
+    [void]$panel.Children.Add($cancel)
+    [System.Windows.Controls.Grid]::SetRow($panel,2)
+    [void]$grid.Children.Add($panel)
+
+    $result = $null
+    $ok.Add_Click({
+        $candidate = Normalize-DroppedPath $tb.Text
+        if (-not (Test-ExistingFolderSafe $candidate)) {
+            [System.Windows.MessageBox]::Show("Folder nie istnieje:`n$candidate",$title) | Out-Null
+            return
+        }
+        $script:__PathDialogResult = $candidate
+        $w.DialogResult = $true
+        $w.Close()
+    })
+    $cancel.Add_Click({
+        $script:__PathDialogResult = $null
+        $w.DialogResult = $false
+        $w.Close()
+    })
+
+    $script:__PathDialogResult = $null
+    $w.Content = $grid
+    [void]$w.ShowDialog()
+    return $script:__PathDialogResult
+}
+
+function Start-TranslationUpdate([string]$updatedOriginalPath, [string]$translationModPath) {
+    if (-not (Test-ExistingFolderSafe $updatedOriginalPath)) { throw "Nie znaleziono zaktualizowanego moda źródłowego." }
+    if (-not (Test-ExistingFolderSafe $translationModPath)) { throw "Nie znaleziono istniejącego moda tłumaczeniowego." }
+
+    $translationInfo = Get-TranslationModInfo $translationModPath
+    if (-not $translationInfo.IsTranslationMod) { throw "Wybrany folder nie wygląda na mod tłumaczeniowy." }
+
+    $targetCode = [string]$translationInfo.TargetCode
+    if ([string]::IsNullOrWhiteSpace($targetCode)) { throw "Nie wykryto języka istniejącego tłumaczenia." }
+
+    Select-LanguageComboCode $cmbTargetLang $targetCode
+    if ($targetCode -eq "pl") { Select-LanguageComboCode $cmbSourceLang "en" }
+    else { Select-LanguageComboCode $cmbSourceLang "pl" }
+
+    $scan = Analyze-Mod $updatedOriginalPath
+    $oldMap = Read-LanguageEntries $translationModPath $targetCode
+
+    $preserved = 0
+    $newCount = 0
+    $missing = 0
+
+    foreach ($e in $script:Entries) {
+        $id = "$($e.File)|$($e.Key)".ToLowerInvariant()
+        if ($oldMap.ContainsKey($id)) {
+            $oldText = [string]$oldMap[$id].Text
+            if (-not [string]::IsNullOrWhiteSpace($oldText)) {
+                $e.Translation = $oldText
+                $preserved++
+                if ($oldText -eq [string]$e.Source) { $missing++ }
+            } else {
+                $e.Translation = ""
+                $missing++
+            }
+        } else {
+            $e.Translation = ""
+            $newCount++
+            $missing++
+        }
+    }
+
+    $currentIds = @{}
+    foreach ($e in $script:Entries) {
+        $currentIds["$($e.File)|$($e.Key)".ToLowerInvariant()] = $true
+    }
+
+    $obsolete = 0
+    foreach ($id in $oldMap.Keys) {
+        if (-not $currentIds.ContainsKey($id)) { $obsolete++ }
+    }
+
+    $script:EditingTranslationModPath = $translationModPath
+    $script:EditingTranslationPackageId = [string]$translationInfo.PackageId
+    $script:EditingTranslationName = [string]$translationInfo.Name
+    $script:UpdateMode = $true
+    $script:UpdateTranslationPath = $translationModPath
+    $script:UpdateOriginalPath = $updatedOriginalPath
+    $script:UpdateStats = [pscustomobject]@{
+        Total = $script:Entries.Count
+        Preserved = $preserved
+        New = $newCount
+        MissingCount = $missing
+        Obsolete = $obsolete
+        TargetCode = $targetCode
+    }
+
+    $txtModPath.Text = $updatedOriginalPath
+    $txtModName.Text = [string]$translationInfo.Name
+    $txtPackageId.Text = [string]$translationInfo.PackageId
+    Refresh-Grid
+    Refresh-LanguageCoverageUi
+
+    $btnBuild.Content = if ($script:UiLanguage -eq "en") { "Save translation update" } else { "Zapisz aktualizację" }
+    return $script:UpdateStats
+}
+
+function Reset-TranslationUpdateMode {
+    $script:UpdateMode = $false
+    $script:UpdateTranslationPath = ""
+    $script:UpdateOriginalPath = ""
+    $script:UpdateStats = $null
+    $btnBuild.Content = if ($script:UiLanguage -eq "en") { "Build separate mod" } else { "Zbuduj oddzielny mod" }
+}
+
+
+
+
+function Set-ControlTextSafe($control, [string]$value) {
+    if ($null -eq $control) { return }
+    if ($null -ne $control.PSObject.Properties["Text"]) {
+        $control.Text = $value
+        return
+    }
+    if ($null -ne $control.PSObject.Properties["Content"]) {
+        $control.Content = $value
+        return
+    }
+}
+
+function Test-ExistingFolderSafe([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) { return $false }
+    try {
+        return (Test-Path -LiteralPath $path -PathType Container)
+    } catch {
+        return $false
+    }
+}
+
+function Normalize-DroppedPath([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) { return "" }
+    $p = $path.Trim().Trim('"')
+    try { return [System.IO.Path]::GetFullPath($p) } catch { return $p }
+}
+
+function Load-RimWorldModPath([string]$path, [switch]$Silent) {
+    $path = Normalize-DroppedPath $path
+    if (-not (Test-ExistingFolderSafe $path)) {
+        if (-not $Silent) {
+            [System.Windows.MessageBox]::Show("Nie znaleziono folderu moda:`n$path","Mod Translation Toolkit") | Out-Null
+        }
+        return $null
+    }
+
+    try {
+        Reset-TranslationUpdateMode
+        $script:EditingTranslationModPath = ""
+        $script:EditingTranslationPackageId = ""
+        $script:EditingTranslationName = ""
+
+        $txtModPath.Text = $path
+        $scan = Analyze-Mod $path
+        Refresh-LanguageCoverageUi
+        $txtStatus.Text = "Załadowano folder moda. Wpisy: $($scan.Total). Automatycznie podstawiono istniejących: $($scan.AutoLoadedExisting)."
+        return $scan
+    } catch {
+        if (-not $Silent) {
+            [System.Windows.MessageBox]::Show($_.Exception.Message,"Błąd") | Out-Null
+        }
+        return $null
+    }
+}
+
+function Load-KenshiPath([string]$path, [switch]$Silent) {
+    $path = Normalize-DroppedPath $path
+    if (-not (Test-ExistingFolderSafe $path)) {
+        if (-not $Silent) {
+            [System.Windows.MessageBox]::Show("Nie znaleziono folderu Kenshi:`n$path","Mod Translation Toolkit") | Out-Null
+        }
+        return $false
+    }
+
+    $txtKenshiPath.Text = $path
+    $script:KenshiRoot = $path
+    $txtKenshiStatus.Text = "Załadowano ścieżkę Kenshi: $path"
+    return $true
+}
+
+function Get-DroppedFolderPath($e) {
+    try {
+        if ($e.Data.GetDataPresent([System.Windows.DataFormats]::FileDrop)) {
+            $paths = @($e.Data.GetData([System.Windows.DataFormats]::FileDrop))
+            foreach ($p in $paths) {
+                if (Test-ExistingFolderSafe $p) {
+                    return [string]$p
+                }
+            }
+        }
+    } catch {}
+    return ""
 }
 
 function Analyze-Mod([string]$modPath) {
@@ -2268,7 +2619,7 @@ function Set-ClipboardTextSafe([string]$text, [int]$maxAttempts = 8, [int]$delay
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Mod Translation Toolkit v0.3.2"
+        Title="Mod Translation Toolkit v0.3.8"
         Height="840" Width="1260"
         WindowStartupLocation="CenterScreen"
         Background="#121018"
@@ -2406,7 +2757,7 @@ function Set-ClipboardTextSafe([string]$text, [int]$maxAttempts = 8, [int]$delay
           <TextBlock Text="RimWorld profile • dark Mrokar theme" Foreground="#AFA2C0" FontSize="12"/>
         </StackPanel>
         <Border Grid.Column="1" Background="#2B2038" CornerRadius="5" Padding="10,5" VerticalAlignment="Center">
-          <TextBlock Text="v0.3.2" Foreground="#CDA8F2" FontWeight="SemiBold"/>
+          <TextBlock Text="v0.3.8" Foreground="#CDA8F2" FontWeight="SemiBold"/>
         </Border>
       </Grid>
     </Border>
@@ -2419,6 +2770,7 @@ function Set-ClipboardTextSafe([string]$text, [int]$maxAttempts = 8, [int]$delay
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
             <RowDefinition Height="*"/>
             <RowDefinition Height="Auto"/>
           </Grid.RowDefinitions>
@@ -2427,6 +2779,7 @@ function Set-ClipboardTextSafe([string]$text, [int]$maxAttempts = 8, [int]$delay
             <Button Name="btnChooseMod" Content="Wybierz folder moda"/>
             <TextBox Name="txtModPath" Width="670" IsReadOnly="True" VerticalContentAlignment="Center"/>
             <Button Name="btnAnalyze" Content="Skanuj ponownie" Margin="8,0,0,0"/>
+            <Button Name="btnUpdateExisting" Content="Aktualizuj istniejące tłumaczenie"/>
             <Button Name="btnOpenCurrentFolder" Content="Otwórz folder moda" Margin="8,0,0,0"/>
           </StackPanel>
 
@@ -2500,7 +2853,26 @@ function Set-ClipboardTextSafe([string]$text, [int]$maxAttempts = 8, [int]$delay
             </StackPanel>
           </Border>
 
-          <DataGrid Grid.Row="4" Name="grid" AutoGenerateColumns="False" CanUserAddRows="False"
+          <Border Grid.Row="4" Background="#211A2B" BorderBrush="#4A385D" BorderThickness="1"
+                  CornerRadius="4" Padding="8" Margin="0,0,0,10">
+            <WrapPanel VerticalAlignment="Center">
+              <TextBlock Name="lblSearchTitle" Text="Szukaj:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+              <TextBox Name="txtSearchTerm" Width="230" Margin="0,0,8,0"
+                       ToolTip="Szukaj w tekście źródłowym lub tłumaczeniu."/>
+              <ComboBox Name="cmbSearchScope" Width="140" Margin="0,0,8,0">
+                <ComboBoxItem Content="Oba" Tag="both" IsSelected="True"/>
+                <ComboBoxItem Content="Oryginał" Tag="source"/>
+                <ComboBoxItem Content="Tłumaczenie" Tag="translation"/>
+              </ComboBox>
+              <Button Name="btnClearSearch" Content="Wyczyść" Margin="0,0,14,0"/>
+              <TextBlock Name="lblReplaceTitle" Text="Nowy tekst:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+              <TextBox Name="txtReplaceTerm" Width="230" Margin="0,0,8,0"/>
+              <Button Name="btnReplaceAll" Content="Zamień wszędzie"/>
+              <Label Name="lblSearchCount" Content="" VerticalContentAlignment="Center" Margin="8,0,0,0"/>
+            </WrapPanel>
+          </Border>
+
+          <DataGrid Grid.Row="5" Name="grid" AutoGenerateColumns="False" CanUserAddRows="False"
                     CanUserDeleteRows="False" IsReadOnly="False" SelectionMode="Extended"
                     EnableRowVirtualization="True" AlternationCount="2">
             <DataGrid.Columns>
@@ -2527,7 +2899,7 @@ function Set-ClipboardTextSafe([string]$text, [int]$maxAttempts = 8, [int]$delay
             </DataGrid.Columns>
           </DataGrid>
 
-          <TextBlock Grid.Row="5" Name="txtStatus" Margin="0,10,0,0" TextWrapping="Wrap"
+          <TextBlock Grid.Row="6" Name="txtStatus" Margin="0,10,0,0" TextWrapping="Wrap"
                      Foreground="#B9AEC9"
                      Text="Wybierz mod ręcznie albo przejdź do zakładki „Zainstalowane mody”."/>
         </Grid>
@@ -2580,7 +2952,7 @@ function Set-ClipboardTextSafe([string]$text, [int]$maxAttempts = 8, [int]$delay
           <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
             <Button Name="btnDetectKenshi" Content="Wykryj Kenshi"/>
             <Button Name="btnChooseKenshi" Content="Wybierz folder Kenshi"/>
-            <TextBox Name="txtKenshiPath" Width="650" Margin="8,0"/>
+            <TextBox Name="txtKenshiPath" Width="650" Margin="8,0" AllowDrop="True" ToolTip="Wklej ścieżkę lub przeciągnij tutaj folder gry."/>
             <Button Name="btnOpenKenshiFolder" Content="Otwórz folder"/>
           </StackPanel>
 
@@ -2664,7 +3036,9 @@ $window = [Windows.Markup.XamlReader]::Load($reader)
 $names = @(
     "btnChooseMod","btnAnalyze","btnExport","btnImport","btnAutoTranslate","btnValidate","btnBuild",
     "txtModPath","txtModName","txtPackageId","txtAuthor","grid","lblCount","txtStatus",
-    "btnDetect","txtSearch","lblMods","modsGrid","btnUseSelected","btnOpenFolder","btnOpenCurrentFolder","cmbSourceLang","cmbTargetLang","lblSourceLang","lblTargetLang","tabTranslation","tabInstalledMods","tabGameProfiles","chkPreviewFlag","cmbPreviewFlag","btnCopyWorkshop","lblCoverageTitle","txtCoveragePL","txtCoverageEN","btnLoadExistingPL","btnLoadExistingEN","tabKenshi","btnOpenKenshiProfile","btnDetectKenshi","btnChooseKenshi","txtKenshiPath","btnOpenKenshiFolder","btnScanKenshi","btnTranslateKenshi","btnExportKenshiCsv","btnImportKenshiCsv","btnFcsHelpKenshi","btnBuildKenshi","lblKenshiCount","kenshiGrid","txtKenshiStatus"
+    "btnDetect","txtSearch","lblMods","modsGrid","btnUseSelected","btnOpenFolder","btnOpenCurrentFolder","cmbSourceLang","cmbTargetLang","lblSourceLang","lblTargetLang","tabTranslation","tabInstalledMods","tabGameProfiles","chkPreviewFlag","cmbPreviewFlag","btnCopyWorkshop","lblCoverageTitle","txtCoveragePL","txtCoverageEN","btnLoadExistingPL","btnLoadExistingEN","tabKenshi","btnOpenKenshiProfile","btnDetectKenshi","btnChooseKenshi","txtKenshiPath","btnOpenKenshiFolder","btnScanKenshi","btnTranslateKenshi","btnExportKenshiCsv","btnImportKenshiCsv","btnFcsHelpKenshi","btnBuildKenshi","lblKenshiCount","kenshiGrid","txtKenshiStatus",
+  "btnUpdateExisting",
+  "lblSearchTitle","txtSearchTerm","cmbSearchScope","btnClearSearch","lblReplaceTitle","txtReplaceTerm","btnReplaceAll","lblSearchCount"
 )
 foreach ($n in $names) { Set-Variable -Name $n -Value $window.FindName($n) }
 
@@ -2739,6 +3113,16 @@ function Apply-UiLanguage {
     $lblCoverageTitle.Text = "Existing languages:"
     $btnLoadExistingPL.Content = "Reload Polish"
     $btnLoadExistingEN.Content = "Reload English"
+    $btnUpdateExisting.Content = "Update existing translation"
+    $lblSearchTitle.Text = "Search:"
+    $btnClearSearch.Content = "Clear"
+    $lblReplaceTitle.Text = "New text:"
+    $btnReplaceAll.Content = "Replace all"
+    try {
+        $cmbSearchScope.Items[0].Content = "Both"
+        $cmbSearchScope.Items[1].Content = "Source"
+        $cmbSearchScope.Items[2].Content = "Translation"
+    } catch {}
     $window.FindName("btnChooseMod").Content = "Choose mod folder"
     $window.FindName("btnAnalyze").Content = "Scan again"
     $window.FindName("btnOpenCurrentFolder").Content = "Open mod folder"
@@ -2801,11 +3185,131 @@ $cmbTargetLang.Add_SelectionChanged({
     } catch {}
 })
 
+
+$btnUpdateExisting.Add_Click({
+    try {
+        $defaultSource = if (Test-ExistingFolderSafe $txtModPath.Text) { $txtModPath.Text } else { "" }
+
+        $updatedOriginal = Show-PathInputDialog `
+            "Aktualizacja tłumaczenia — źródło" `
+            "Wklej ścieżkę albo przeciągnij folder ZAKTUALIZOWANEGO moda źródłowego:" `
+            $defaultSource
+        if ([string]::IsNullOrWhiteSpace($updatedOriginal)) { return }
+
+        $translationMod = Show-PathInputDialog `
+            "Aktualizacja tłumaczenia — istniejące tłumaczenie" `
+            "Wklej ścieżkę albo przeciągnij folder ISTNIEJĄCEGO moda tłumaczeniowego:" `
+            ""
+        if ([string]::IsNullOrWhiteSpace($translationMod)) { return }
+
+        $stats = Start-TranslationUpdate $updatedOriginal $translationMod
+        if ($null -eq $stats) { throw "Nie udało się utworzyć podsumowania aktualizacji." }
+
+        Set-ControlTextSafe $txtStatus "Tryb aktualizacji. Zachowane: $($stats.Preserved), nowe: $($stats.New), brakujące: $($stats.MissingCount), nieaktualne: $($stats.Obsolete). packageId i About.xml zostaną zachowane."
+
+        [System.Windows.MessageBox]::Show(
+            "Wczytano aktualizację tłumaczenia.`n`nZachowane: $($stats.Preserved)`nNowe: $($stats.New)`nBrakujące: $($stats.MissingCount)`nNieaktualne: $($stats.Obsolete)`n`nUzupełnij tylko nowe/brakujące wpisy, a potem kliknij Zapisz aktualizację.",
+            "Mod Translation Toolkit"
+        ) | Out-Null
+    } catch {
+        [System.Windows.MessageBox]::Show($_.Exception.Message, "Błąd") | Out-Null
+    }
+})
+
+
+$txtModPath.Add_KeyDown({
+    param($sender, $e)
+    if ($e.Key -eq [System.Windows.Input.Key]::Enter) {
+        [void](Load-RimWorldModPath $txtModPath.Text)
+        $e.Handled = $true
+    }
+})
+
+$txtModPath.Add_LostFocus({
+    if (Test-ExistingFolderSafe $txtModPath.Text) {
+        if ($script:OriginalModPath -ne $txtModPath.Text) {
+            [void](Load-RimWorldModPath $txtModPath.Text -Silent)
+        }
+    }
+})
+
+$txtModPath.Add_PreviewDragOver({
+    param($sender, $e)
+    $e.Effects = [System.Windows.DragDropEffects]::Copy
+    $e.Handled = $true
+})
+
+$txtModPath.Add_Drop({
+    param($sender, $e)
+    $folder = Get-DroppedFolderPath $e
+    if (-not [string]::IsNullOrWhiteSpace($folder)) {
+        [void](Load-RimWorldModPath $folder)
+        $e.Handled = $true
+    }
+})
+
+$txtKenshiPath.Add_PreviewDragOver({
+    param($sender, $e)
+    $e.Effects = [System.Windows.DragDropEffects]::Copy
+    $e.Handled = $true
+})
+
+$txtKenshiPath.Add_Drop({
+    param($sender, $e)
+    $folder = Get-DroppedFolderPath $e
+    if (-not [string]::IsNullOrWhiteSpace($folder)) {
+        [void](Load-KenshiPath $folder)
+        $e.Handled = $true
+    }
+})
+
+$txtKenshiPath.Add_KeyDown({
+    param($sender, $e)
+    if ($e.Key -eq [System.Windows.Input.Key]::Enter) {
+        [void](Load-KenshiPath $txtKenshiPath.Text)
+        $e.Handled = $true
+    }
+})
+
+
+$txtSearchTerm.Add_TextChanged({
+    Refresh-SearchResults
+})
+
+$cmbSearchScope.Add_SelectionChanged({
+    Refresh-SearchResults
+})
+
+$btnClearSearch.Add_Click({
+    $txtSearchTerm.Text = ""
+    $txtReplaceTerm.Text = ""
+    Refresh-SearchResults
+})
+
+$btnReplaceAll.Add_Click({
+    $search = [string]$txtSearchTerm.Text
+    $replacement = [string]$txtReplaceTerm.Text
+    if ([string]::IsNullOrWhiteSpace($search)) {
+        [System.Windows.MessageBox]::Show("Najpierw wpisz szukane sformułowanie.","Mod Translation Toolkit") | Out-Null
+        return
+    }
+
+    $scope = Get-SearchScopeCode
+    $count = Replace-InFilteredTranslations $search $replacement $scope
+
+    if ($scope -eq "source") {
+        Set-ControlTextSafe $txtStatus "Ustawiono tłumaczenie dla $count pasujących wpisów źródłowych."
+    } else {
+        Set-ControlTextSafe $txtStatus "Zmieniono tekst w $count tłumaczeniach."
+    }
+})
+
 $btnChooseMod.Add_Click({
     $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
     $dlg.Description = "Wybierz główny folder moda RimWorld"
     if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
         $txtModPath.Text = $dlg.SelectedPath
+            Reset-TranslationUpdateMode
             $script:EditingTranslationModPath = ""
             $script:EditingTranslationPackageId = ""
             $script:EditingTranslationName = ""
