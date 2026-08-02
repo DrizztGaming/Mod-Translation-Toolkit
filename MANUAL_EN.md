@@ -59,7 +59,7 @@ In the **Workshop** tab you can:
 
 The Toolkit does not ask for a Steam password and does not store a publisher API key.
 
-## Kenshi
+## Kenshi Game
 The Kenshi profile currently focuses on the base game:
 - UI gettext from `locale\en\LC_MESSAGES\main.pot/main.po`,
 - game data/dialogue after FCS export,
@@ -72,3 +72,25 @@ The final gameplay-data `.translation` file still needs to be built in Forgotten
 
 ## Important
 Automatic translation is optional. Manual localization and terminology correction remain first-class workflows.
+
+
+## Navigation v0.5.0
+The top-level Toolkit navigation is now:
+- **Game profiles**
+  - **RimWorld Game**
+  - **RimWorld Mod**
+    - **Translation**
+    - **Installed mods**
+  - **Kenshi Game**
+- **Workshop**
+
+### RimWorld Game
+The first version detects the RimWorld installation, lists Core and detected DLC/data modules, and lets you select one module, all modules, Core only or DLC only. The current scanner collects English and Polish Keyed entries from the selected modules. DefInjected/Defs support and game-version change comparison will be expanded later.
+
+
+### RimWorld Game — language detection
+Since v0.5.2 the Toolkit no longer assumes a fixed `Languages\Polish` folder. It checks `LanguageInfo.xml` first and only then falls back to the folder name. `Keyed` and `DefInjected` are scanned separately. The scan status reports how many Polish entries were found and matched.
+
+
+### Official RimWorld language archives
+RimWorld stores many official translations as `.tar` files, for example `Polish (Polski).tar`. Since v0.5.3 the Toolkit detects these archives, extracts them only to a temporary cache under `%TEMP%`, and reads `Keyed` and `DefInjected` from them. Original game files are never modified.

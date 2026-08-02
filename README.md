@@ -2,7 +2,7 @@
 
 A Windows desktop helper for translating game mods.
 
-> **Current release:** v0.4.3  
+> **Current release:** v0.5.5  
 > **Currently supported game:** RimWorld
 
 The project started as a small RimWorld translation helper and is being prepared as a multi-game toolkit with separate game profiles.
@@ -115,3 +115,17 @@ When placeholder problems are detected, the user can:
 - repair manually with problematic rows highlighted,
 - repair all detected issues automatically,
 - review every proposed repair one by one with Yes / No confirmation.
+
+
+## UI structure (v0.5.0)
+- **Profile gier**
+  - **RimWorld Game** — base game / DLC localization workspace.
+  - **RimWorld Mod**
+    - **Tłumaczenie**
+    - **Zainstalowane mody**
+  - **Kenshi Game**
+- **Workshop** remains a separate top-level section.
+
+The first RimWorld Game workspace detects the game installation, lists Core and detected DLC/data modules, allows selecting Core only, DLC only or any combination, and scans English/Polish Keyed language XML for the selected modules.
+
+- RimWorld Game supports official RimWorld `.tar` language archives as well as loose language folders.

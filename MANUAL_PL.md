@@ -59,7 +59,7 @@ W zakładce **Workshop** możesz:
 
 Toolkit nie prosi o hasło Steam i nie przechowuje publisher API key.
 
-## Kenshi
+## Kenshi Game
 Profil Kenshi obsługuje obecnie podstawową grę:
 - UI gettext z `locale\en\LC_MESSAGES\main.pot/main.po`,
 - dane gry/dialogi po eksporcie FCS,
@@ -72,3 +72,25 @@ Finalny plik danych `.translation` nadal buduje Forgotten Construction Set.
 
 ## Ważne
 Automatyczne tłumaczenie jest opcjonalne. Ręczna praca i poprawki terminologii są pełnoprawnym workflow Toolkita.
+
+
+## Nawigacja v0.5.0
+Górny poziom Toolkita został uproszczony:
+- **Profile gier**
+  - **RimWorld Game**
+  - **RimWorld Mod**
+    - **Tłumaczenie**
+    - **Zainstalowane mody**
+  - **Kenshi Game**
+- **Workshop**
+
+### RimWorld Game
+Pierwsza wersja tego modułu wykrywa instalację RimWorlda, pokazuje Core i wykryte dodatki/moduły danych oraz pozwala zaznaczyć pojedynczy moduł, wszystkie, tylko Core albo tylko DLC. Skan obecnie zbiera angielskie i polskie wpisy Keyed z wybranych modułów. Obsługa DefInjected/Defs i porównywanie zmian wersji gry będzie rozwijane dalej.
+
+
+### RimWorld Game — wykrywanie języków
+Od v0.5.2 Toolkit nie zakłada już sztywno folderu `Languages\Polish`. Najpierw analizuje `LanguageInfo.xml`, a dopiero potem nazwę folderu. Skanowane są osobno `Keyed` i `DefInjected`. Po skanie status pokazuje, ile polskich wpisów znaleziono i dopasowano.
+
+
+### Oficjalne archiwa językowe RimWorlda
+RimWorld przechowuje wiele oficjalnych tłumaczeń jako pliki `.tar`, np. `Polish (Polski).tar`. Od v0.5.3 Toolkit wykrywa takie archiwa, rozpakowuje je wyłącznie do tymczasowego cache w `%TEMP%` i odczytuje z nich `Keyed` oraz `DefInjected`. Oryginalne pliki gry nie są modyfikowane.

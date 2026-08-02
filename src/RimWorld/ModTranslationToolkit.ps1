@@ -7,7 +7,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-$AppVersion = "0.4.3"
+$AppVersion = "0.5.5"
 $script:UiLanguage = "pl"
 $script:Entries = New-Object System.Collections.ArrayList
 $script:Mods = New-Object System.Collections.ArrayList
@@ -2003,7 +2003,7 @@ function Get-TargetLanguageInfo {
     }
 }
 
-function Build-SteamWorkshopDescription([string]$outMod, [string]$translationAuthor) {
+function Get-SteamWorkshopDescriptionText([string]$translationAuthor) {
     $lang = Get-TargetLanguageInfo
     $originalLink = $script:OriginalWorkshopUrl
     if ([string]::IsNullOrWhiteSpace($originalLink)) {
@@ -2062,13 +2062,17 @@ If you enjoy my mods and tools, you can support my work here:
 [url=$kofiUrl][b]☕ Support me on Ko-fi[/b][/url]
 "@
 
+    return $description
+}
+
+function Build-SteamWorkshopDescription([string]$outMod, [string]$translationAuthor) {
+    $description = Get-SteamWorkshopDescriptionText $translationAuthor
     $path = Join-Path $outMod "SteamWorkshopDescription.txt"
     [System.IO.File]::WriteAllText(
         $path,
         $description,
         (New-Object System.Text.UTF8Encoding($false))
     )
-
     return $path
 }
 
@@ -3223,7 +3227,7 @@ function Apply-CreatorProfileToTranslator {
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Mod Translation Toolkit v0.4.3"
+        Title="Mod Translation Toolkit v0.5.5"
         Height="840" Width="1260"
         WindowStartupLocation="CenterScreen"
         Background="#121018"
@@ -3361,13 +3365,79 @@ function Apply-CreatorProfileToTranslator {
           <TextBlock Text="RimWorld profile • dark Mrokar theme" Foreground="#AFA2C0" FontSize="12"/>
         </StackPanel>
         <Border Grid.Column="1" Background="#2B2038" CornerRadius="5" Padding="10,5" VerticalAlignment="Center">
-          <TextBlock Text="v0.4.3" Foreground="#CDA8F2" FontWeight="SemiBold"/>
+          <TextBlock Text="v0.5.5" Foreground="#CDA8F2" FontWeight="SemiBold"/>
         </Border>
       </Grid>
     </Border>
 
     <TabControl Grid.Row="1" Background="{StaticResource Bg}" BorderBrush="{StaticResource Border}" Margin="10">
-      <TabItem Name="tabTranslation" Header="Tłumaczenie">
+      <TabItem Name="tabGameProfiles" Header="Profile gier">
+        <TabControl Name="tabGameProfilesInner" Background="{StaticResource Bg}" BorderBrush="{StaticResource Border}" Margin="6">
+          <TabItem Name="tabRimWorldGame" Header="RimWorld Game">
+        <Grid Margin="12" Background="{StaticResource Bg}">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
+
+          <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
+            <Button Name="btnDetectRimWorldGame" Content="Wykryj RimWorld"/>
+            <Button Name="btnChooseRimWorldGame" Content="Wybierz folder gry"/>
+            <TextBox Name="txtRimWorldGamePath" Width="650" Margin="8,0" AllowDrop="True"
+                     ToolTip="Wklej ścieżkę lub przeciągnij tutaj folder RimWorld."/>
+            <Button Name="btnOpenRimWorldGameFolder" Content="Otwórz folder"/>
+          </StackPanel>
+
+          <Border Grid.Row="1" Background="#211A2B" BorderBrush="#4A385D" BorderThickness="1"
+                  CornerRadius="6" Padding="10" Margin="0,0,0,10">
+            <StackPanel>
+              <TextBlock Text="RimWorld Game — podstawa gry i dodatki" FontSize="18" FontWeight="SemiBold" Foreground="#CDA8F2"/>
+              <TextBlock Text="Wybierz Core albo dowolny z wykrytych dodatków. Każdy moduł może być skanowany osobno."
+                         Foreground="#B9AEC9" Margin="0,4,0,0" TextWrapping="Wrap"/>
+            </StackPanel>
+          </Border>
+
+          <Grid Grid.Row="2" Margin="0,0,0,10">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*"/>
+              <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <StackPanel Grid.Column="0">
+              <TextBlock Text="Moduły / DLC:" FontWeight="SemiBold" Margin="0,0,0,4"/>
+              <ListBox Name="lstRimWorldGameModules" Height="120" SelectionMode="Extended"/>
+            </StackPanel>
+            <StackPanel Grid.Column="1" Margin="10,20,0,0">
+              <Button Name="btnRwGameSelectAll" Content="Zaznacz wszystko"/>
+              <Button Name="btnRwGameCoreOnly" Content="Tylko Core"/>
+              <Button Name="btnRwGameDlcOnly" Content="Tylko DLC"/>
+              <Button Name="btnScanRimWorldGame" Content="Skanuj wybrane" Margin="0,8,0,0"/>
+            </StackPanel>
+          </Grid>
+
+          <DataGrid Grid.Row="3" Name="rimWorldGameGrid" AutoGenerateColumns="False" CanUserAddRows="False"
+                    SelectionMode="Single" EnableRowVirtualization="True" AlternationCount="2">
+            <DataGrid.Columns>
+              <DataGridTextColumn Header="Moduł" Binding="{Binding Module}" Width="110"/>
+              <DataGridTextColumn Header="Typ" Binding="{Binding Type}" Width="160"/>
+              <DataGridTextColumn Header="Klucz" Binding="{Binding Key}" Width="260"/>
+              <DataGridTextColumn Header="Angielski" Binding="{Binding Source}" Width="*"/>
+              <DataGridTextColumn Header="Polski" Binding="{Binding Translation}" Width="*"/>
+            </DataGrid.Columns>
+          </DataGrid>
+
+          <StackPanel Grid.Row="4" Orientation="Horizontal" Margin="0,10,0,0">
+            <TextBlock Name="lblRimWorldGameCount" Text="Wpisy: 0" VerticalAlignment="Center" Margin="0,0,16,0"/>
+            <TextBlock Name="txtRimWorldGameStatus" Text="Wybierz folder gry albo użyj automatycznego wykrywania."
+                       Foreground="#B9AEC9" VerticalAlignment="Center"/>
+          </StackPanel>
+        </Grid>
+      </TabItem>
+          <TabItem Name="tabRimWorldMod" Header="RimWorld Mod">
+        <TabControl Name="tabRimWorldModInner" Background="{StaticResource Bg}" BorderBrush="{StaticResource Border}" Margin="6">
+          <TabItem Name="tabTranslation" Header="Tłumaczenie">
         <Grid Margin="12" Background="{StaticResource Bg}">
           <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -3440,7 +3510,7 @@ function Apply-CreatorProfileToTranslator {
             <Button Name="btnKeybindDiagnostics" Content="Diagnostyka skrótów"/>
             <Button Name="btnAssemblyDiagnostics" Content="Diagnostyka DLL/UI"/>
             <Button Name="btnBuild" Content="Zbuduj oddzielny mod"/>
-            <Button Name="btnCopyWorkshop" Content="Kopiuj opis Workshop" IsEnabled="False"/>
+            <Button Name="btnCopyWorkshop" Content="Kopiuj opis Workshop" IsEnabled="True"/>
             <Label Name="lblCount" Content="Wpisy: 0" VerticalContentAlignment="Center"/>
           </WrapPanel>
 
@@ -3510,8 +3580,7 @@ function Apply-CreatorProfileToTranslator {
                      Text="Wybierz mod ręcznie albo przejdź do zakładki „Zainstalowane mody”."/>
         </Grid>
       </TabItem>
-
-      <TabItem Name="tabInstalledMods" Header="Zainstalowane mody">
+          <TabItem Name="tabInstalledMods" Header="Zainstalowane mody">
         <Grid Margin="12" Background="{StaticResource Bg}">
           <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
@@ -3544,7 +3613,69 @@ function Apply-CreatorProfileToTranslator {
           </StackPanel>
         </Grid>
       </TabItem>
+        </TabControl>
+      </TabItem>
+          <TabItem Name="tabKenshi" Header="Kenshi Game">
+        <Grid Margin="12" Background="{StaticResource Bg}">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
 
+          <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
+            <Button Name="btnDetectKenshi" Content="Wykryj Kenshi"/>
+            <Button Name="btnChooseKenshi" Content="Wybierz folder Kenshi"/>
+            <TextBox Name="txtKenshiPath" Width="650" Margin="8,0" AllowDrop="True" ToolTip="Wklej ścieżkę lub przeciągnij tutaj folder gry."/>
+            <Button Name="btnOpenKenshiFolder" Content="Otwórz folder"/>
+          </StackPanel>
+
+          <Border Grid.Row="1" Background="#211A2B" BorderBrush="#4A385D" BorderThickness="1" CornerRadius="6" Padding="10" Margin="0,0,0,10">
+            <StackPanel>
+              <TextBlock Text="Kenshi — tłumaczenie podstawowej gry" FontSize="18" FontWeight="SemiBold" Foreground="#CDA8F2"/>
+              <TextBlock Text="UI: locale\en\LC_MESSAGES\main.pot/main.po. Dane gry i dialogi: eksport FCS do __translations\base."
+                         Foreground="#B9AEC9" Margin="0,4,0,0" TextWrapping="Wrap"/>
+            </StackPanel>
+          </Border>
+
+          <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,10">
+            <Button Name="btnScanKenshi" Content="Skanuj podstawę gry"/>
+            <Button Name="btnTranslateKenshi" Content="Tłumacz brakujące"/>
+            <Button Name="btnExportKenshiCsv" Content="Eksport CSV"/>
+            <Button Name="btnImportKenshiCsv" Content="Import CSV"/>
+            <Button Name="btnFcsHelpKenshi" Content="Jak wyeksportować dane z FCS?"/>
+            <Button Name="btnBuildKenshi" Content="Przygotuj pliki pl_PL"/>
+            <Label Name="lblKenshiCount" Content="Wpisy: 0" VerticalContentAlignment="Center" Margin="8,0,0,0"/>
+          </StackPanel>
+
+          <DataGrid Grid.Row="3" Name="kenshiGrid" AutoGenerateColumns="False" CanUserAddRows="False"
+                    SelectionMode="Single" EnableRowVirtualization="True" AlternationCount="2">
+            <DataGrid.Columns>
+              <DataGridTextColumn Header="Typ" Binding="{Binding Kind}" Width="100" IsReadOnly="True"/>
+              <DataGridTextColumn Header="Plik" Binding="{Binding File}" Width="230" IsReadOnly="True"/>
+              <DataGridTextColumn Header="Klucz / kontekst" Binding="{Binding Key}" Width="260" IsReadOnly="True"/>
+              <DataGridTemplateColumn Header="Angielski" Width="*">
+                <DataGridTemplateColumn.CellTemplate>
+                  <DataTemplate>
+                    <TextBox Text="{Binding Source}" IsReadOnly="True" IsReadOnlyCaretVisible="True"
+                             BorderThickness="0" Background="Transparent" Foreground="#ECE8F6"
+                             Padding="2,0" TextWrapping="NoWrap"/>
+                  </DataTemplate>
+                </DataGridTemplateColumn.CellTemplate>
+              </DataGridTemplateColumn>
+              <DataGridTextColumn Header="Polski" Binding="{Binding Translation, UpdateSourceTrigger=PropertyChanged}" Width="*"/>
+            </DataGrid.Columns>
+          </DataGrid>
+
+          <TextBlock Grid.Row="4" Name="txtKenshiStatus" Margin="0,10,0,0" TextWrapping="Wrap"
+                     Foreground="#B9AEC9"
+                     Text="Wykryj Kenshi lub wskaż folder instalacji. Profil obsługuje na razie tylko podstawową grę."/>
+        </Grid>
+      </TabItem>
+        </TabControl>
+      </TabItem>
       <TabItem Name="tabWorkshop" Header="Workshop">
         <Grid Margin="12" Background="{StaticResource Bg}">
           <Grid.RowDefinitions>
@@ -3619,93 +3750,6 @@ function Apply-CreatorProfileToTranslator {
                      Text="Dodaj publikacje przez link Workshop lub PublishedFileID. Toolkit nie przechowuje hasła Steam ani publisher API key."/>
         </Grid>
       </TabItem>
-
-      <TabItem Name="tabKenshi" Header="Kenshi">
-        <Grid Margin="12" Background="{StaticResource Bg}">
-          <Grid.RowDefinitions>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="Auto"/>
-            <RowDefinition Height="*"/>
-            <RowDefinition Height="Auto"/>
-          </Grid.RowDefinitions>
-
-          <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
-            <Button Name="btnDetectKenshi" Content="Wykryj Kenshi"/>
-            <Button Name="btnChooseKenshi" Content="Wybierz folder Kenshi"/>
-            <TextBox Name="txtKenshiPath" Width="650" Margin="8,0" AllowDrop="True" ToolTip="Wklej ścieżkę lub przeciągnij tutaj folder gry."/>
-            <Button Name="btnOpenKenshiFolder" Content="Otwórz folder"/>
-          </StackPanel>
-
-          <Border Grid.Row="1" Background="#211A2B" BorderBrush="#4A385D" BorderThickness="1" CornerRadius="6" Padding="10" Margin="0,0,0,10">
-            <StackPanel>
-              <TextBlock Text="Kenshi — tłumaczenie podstawowej gry" FontSize="18" FontWeight="SemiBold" Foreground="#CDA8F2"/>
-              <TextBlock Text="UI: locale\en\LC_MESSAGES\main.pot/main.po. Dane gry i dialogi: eksport FCS do __translations\base."
-                         Foreground="#B9AEC9" Margin="0,4,0,0" TextWrapping="Wrap"/>
-            </StackPanel>
-          </Border>
-
-          <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,10">
-            <Button Name="btnScanKenshi" Content="Skanuj podstawę gry"/>
-            <Button Name="btnTranslateKenshi" Content="Tłumacz brakujące"/>
-            <Button Name="btnExportKenshiCsv" Content="Eksport CSV"/>
-            <Button Name="btnImportKenshiCsv" Content="Import CSV"/>
-            <Button Name="btnFcsHelpKenshi" Content="Jak wyeksportować dane z FCS?"/>
-            <Button Name="btnBuildKenshi" Content="Przygotuj pliki pl_PL"/>
-            <Label Name="lblKenshiCount" Content="Wpisy: 0" VerticalContentAlignment="Center" Margin="8,0,0,0"/>
-          </StackPanel>
-
-          <DataGrid Grid.Row="3" Name="kenshiGrid" AutoGenerateColumns="False" CanUserAddRows="False"
-                    SelectionMode="Single" EnableRowVirtualization="True" AlternationCount="2">
-            <DataGrid.Columns>
-              <DataGridTextColumn Header="Typ" Binding="{Binding Kind}" Width="100" IsReadOnly="True"/>
-              <DataGridTextColumn Header="Plik" Binding="{Binding File}" Width="230" IsReadOnly="True"/>
-              <DataGridTextColumn Header="Klucz / kontekst" Binding="{Binding Key}" Width="260" IsReadOnly="True"/>
-              <DataGridTemplateColumn Header="Angielski" Width="*">
-                <DataGridTemplateColumn.CellTemplate>
-                  <DataTemplate>
-                    <TextBox Text="{Binding Source}" IsReadOnly="True" IsReadOnlyCaretVisible="True"
-                             BorderThickness="0" Background="Transparent" Foreground="#ECE8F6"
-                             Padding="2,0" TextWrapping="NoWrap"/>
-                  </DataTemplate>
-                </DataGridTemplateColumn.CellTemplate>
-              </DataGridTemplateColumn>
-              <DataGridTextColumn Header="Polski" Binding="{Binding Translation, UpdateSourceTrigger=PropertyChanged}" Width="*"/>
-            </DataGrid.Columns>
-          </DataGrid>
-
-          <TextBlock Grid.Row="4" Name="txtKenshiStatus" Margin="0,10,0,0" TextWrapping="Wrap"
-                     Foreground="#B9AEC9"
-                     Text="Wykryj Kenshi lub wskaż folder instalacji. Profil obsługuje na razie tylko podstawową grę."/>
-        </Grid>
-      </TabItem>
-
-      <TabItem Name="tabGameProfiles" Header="Profile gier">
-        <Grid Margin="24" Background="{StaticResource Bg}">
-          <StackPanel>
-            <TextBlock Text="Profile gier" FontSize="24" FontWeight="Bold" Foreground="#D4B5F5" Margin="0,0,0,12"/>
-            <Border Background="#211A2B" BorderBrush="#4A385D" BorderThickness="1" CornerRadius="6" Padding="16" Margin="0,0,0,10">
-              <StackPanel>
-                <TextBlock Text="RimWorld" FontSize="18" FontWeight="SemiBold" Foreground="#CDA8F2"/>
-                <TextBlock Text="Aktywny profil. Languages/English, DefInjected, Defs, Steam Workshop." Foreground="#B9AEC9" Margin="0,4,0,0"/>
-              </StackPanel>
-            </Border>
-            <Border Background="#211A2B" BorderBrush="#6D43A1" BorderThickness="1" CornerRadius="6" Padding="16" Margin="0,0,0,10">
-              <StackPanel>
-                <TextBlock Text="Kenshi" FontSize="18" FontWeight="SemiBold" Foreground="#CDA8F2"/>
-                <TextBlock Text="Profil podstawowej gry. UI gettext (.po/.mo) + eksport FCS gamedata/dialogue." Foreground="#B9AEC9" Margin="0,4,0,10"/>
-                <Button Name="btnOpenKenshiProfile" Content="Otwórz profil Kenshi" HorizontalAlignment="Left"/>
-              </StackPanel>
-            </Border>
-            <Border Background="#19151F" BorderBrush="#33293E" BorderThickness="1" CornerRadius="6" Padding="16">
-              <StackPanel>
-                <TextBlock Text="Kolejne profile" FontSize="18" FontWeight="SemiBold" Foreground="#8F819F"/>
-                <TextBlock Text="Planowane: gry Paradoxu, Project Zomboid, Minecraft i profile generyczne XML/JSON/CSV." Foreground="#8F819F" Margin="0,4,0,0"/>
-              </StackPanel>
-            </Border>
-          </StackPanel>
-        </Grid>
-      </TabItem>
     </TabControl>
   </Grid>
 </Window>
@@ -3717,12 +3761,28 @@ $window = [Windows.Markup.XamlReader]::Load($reader)
 $names = @(
     "btnChooseMod","btnAnalyze","btnExport","btnImport","btnAutoTranslate","btnValidate","btnBuild",
     "txtModPath","txtModName","txtPackageId","txtAuthor","grid","lblCount","txtStatus",
-    "btnDetect","txtSearch","lblMods","modsGrid","btnUseSelected","btnOpenFolder","btnOpenCurrentFolder","cmbSourceLang","cmbTargetLang","lblSourceLang","lblTargetLang","tabTranslation","tabInstalledMods","tabGameProfiles","chkPreviewFlag","cmbPreviewFlag","btnCopyWorkshop","lblCoverageTitle","txtCoveragePL","txtCoverageEN","btnLoadExistingPL","btnLoadExistingEN","tabKenshi","btnOpenKenshiProfile","btnDetectKenshi","btnChooseKenshi","txtKenshiPath","btnOpenKenshiFolder","btnScanKenshi","btnTranslateKenshi","btnExportKenshiCsv","btnImportKenshiCsv","btnFcsHelpKenshi","btnBuildKenshi","lblKenshiCount","kenshiGrid","txtKenshiStatus",
+    "btnDetect","txtSearch","lblMods","modsGrid","btnUseSelected","btnOpenFolder","btnOpenCurrentFolder","cmbSourceLang","cmbTargetLang","lblSourceLang","lblTargetLang","tabTranslation","tabInstalledMods","tabGameProfiles","chkPreviewFlag","cmbPreviewFlag","btnCopyWorkshop","lblCoverageTitle","txtCoveragePL","txtCoverageEN","btnLoadExistingPL","btnLoadExistingEN","tabKenshi","btnDetectKenshi","btnChooseKenshi","txtKenshiPath","btnOpenKenshiFolder","btnScanKenshi","btnTranslateKenshi","btnExportKenshiCsv","btnImportKenshiCsv","btnFcsHelpKenshi","btnBuildKenshi","lblKenshiCount","kenshiGrid","txtKenshiStatus",
   "btnUpdateExisting",
   "lblSearchTitle","txtSearchTerm","cmbSearchScope","btnClearSearch","lblReplaceTitle","txtReplaceTerm","btnReplaceAll","lblSearchCount",
   "tabWorkshop","txtCreatorName","txtSteamProfile","btnSaveCreatorProfile","txtWorkshopItemInput","btnAddWorkshopItem","btnRefreshWorkshop","btnRemoveWorkshopItem","btnOpenWorkshopItem","lblWorkshopItems","lblWorkshopSubscriptions","lblWorkshopFavorites","lblWorkshopViews","workshopGrid","txtWorkshopStatus",
   "btnKeybindDiagnostics",
-  "btnAssemblyDiagnostics"
+  "btnAssemblyDiagnostics",
+  "tabGameProfilesInner",
+  "tabRimWorldGame",
+  "tabRimWorldMod",
+  "tabRimWorldModInner",
+  "btnDetectRimWorldGame",
+  "btnChooseRimWorldGame",
+  "txtRimWorldGamePath",
+  "btnOpenRimWorldGameFolder",
+  "lstRimWorldGameModules",
+  "btnRwGameSelectAll",
+  "btnRwGameCoreOnly",
+  "btnRwGameDlcOnly",
+  "btnScanRimWorldGame",
+  "rimWorldGameGrid",
+  "lblRimWorldGameCount",
+  "txtRimWorldGameStatus"
 )
 foreach ($n in $names) { Set-Variable -Name $n -Value $window.FindName($n) }
 
@@ -3775,8 +3835,20 @@ function Apply-UiLanguage {
         $tabTranslation.Header = "Tłumaczenie"
         $tabInstalledMods.Header = "Zainstalowane mody"
         $tabGameProfiles.Header = "Profile gier"
+        $tabRimWorldGame.Header = "RimWorld Game"
+        $tabRimWorldMod.Header = "RimWorld Mod"
+        $btnDetectRimWorldGame.Content = "Wykryj RimWorld"
+        $btnChooseRimWorldGame.Content = "Wybierz folder gry"
+        $btnOpenRimWorldGameFolder.Content = "Otwórz folder"
+        $btnRwGameSelectAll.Content = "Zaznacz wszystko"
+        $btnRwGameCoreOnly.Content = "Tylko Core"
+        $btnRwGameDlcOnly.Content = "Tylko DLC"
+        $btnScanRimWorldGame.Content = "Skanuj wybrane"
+
         $tabWorkshop.Header = "Workshop"
-    $tabKenshi.Header = "Kenshi"
+    $tabKenshi.Header = "Kenshi Game"
+    $tabRimWorldGame.Header = "RimWorld Game"
+    $tabRimWorldMod.Header = "RimWorld Mod"
         return
     }
 
@@ -3784,7 +3856,17 @@ function Apply-UiLanguage {
     $tabTranslation.Header = "Translation"
     $tabInstalledMods.Header = "Installed mods"
     $tabGameProfiles.Header = "Game profiles"
-    $tabKenshi.Header = "Kenshi"
+    $tabKenshi.Header = "Kenshi Game"
+    $tabRimWorldGame.Header = "RimWorld Game"
+    $tabRimWorldMod.Header = "RimWorld Mod"
+    $btnDetectRimWorldGame.Content = "Detect RimWorld"
+    $btnChooseRimWorldGame.Content = "Choose game folder"
+    $btnOpenRimWorldGameFolder.Content = "Open folder"
+    $btnRwGameSelectAll.Content = "Select all"
+    $btnRwGameCoreOnly.Content = "Core only"
+    $btnRwGameDlcOnly.Content = "DLC only"
+    $btnScanRimWorldGame.Content = "Scan selected"
+
     $btnOpenKenshiProfile.Content = "Open Kenshi profile"
     $btnDetectKenshi.Content = "Detect Kenshi"
     $btnChooseKenshi.Content = "Choose Kenshi folder"
@@ -4140,13 +4222,6 @@ $grid.Add_PreviewKeyDown({
 })
 
 
-$btnOpenKenshiProfile.Add_Click({
-    $window.Content.Children[1].SelectedItem = $tabKenshi
-    if ([string]::IsNullOrWhiteSpace($txtKenshiPath.Text)) {
-        $detected = Get-KenshiInstallPath
-        if ($detected) { $txtKenshiPath.Text = $detected }
-    }
-})
 
 $btnDetectKenshi.Add_Click({
     $detected = Get-KenshiInstallPath
@@ -4445,18 +4520,46 @@ $btnAutoTranslate.Add_Click({
 
 
 $btnCopyWorkshop.Add_Click({
-    if ($script:LastWorkshopDescriptionPath -and (Test-Path $script:LastWorkshopDescriptionPath)) {
-        try {
+    try {
+        $content = $null
+
+        # Prefer the already generated file if it exists.
+        if ($script:LastWorkshopDescriptionPath -and (Test-Path $script:LastWorkshopDescriptionPath)) {
             $content = Get-Content -LiteralPath $script:LastWorkshopDescriptionPath -Raw -Encoding UTF8
+        }
+
+        # Otherwise generate the exact same Workshop description directly
+        # from the currently loaded mod. Building the translation mod is not required.
+        if ([string]::IsNullOrWhiteSpace([string]$content)) {
+            if ([string]::IsNullOrWhiteSpace([string]$script:OriginalModName)) {
+                $msg = if ($script:UiLanguage -eq "en") {
+                    "Load a RimWorld mod first."
+                } else {
+                    "Najpierw załaduj mod RimWorld."
+                }
+                [System.Windows.MessageBox]::Show($msg, "Workshop") | Out-Null
+                return
+            }
+
+            $author = [string]$txtAuthor.Text
+            $content = Get-SteamWorkshopDescriptionText $author
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace([string]$content)) {
             [void](Set-ClipboardTextSafe $content)
             $txtStatus.Text = if ($script:UiLanguage -eq "en") {
                 "Steam Workshop description copied to clipboard."
             } else {
                 "Opis Steam Workshop skopiowany do schowka."
             }
-        } catch {
-            [System.Windows.MessageBox]::Show("Nie udało się uzyskać dostępu do schowka po kilku próbach. Spróbuj ponownie za chwilę.`n`n$($_.Exception.Message)", "Schowek")
         }
+    } catch {
+        $msg = if ($script:UiLanguage -eq "en") {
+            "Could not copy the Workshop description after several attempts.`n`n$($_.Exception.Message)"
+        } else {
+            "Nie udało się skopiować opisu Workshop po kilku próbach.`n`n$($_.Exception.Message)"
+        }
+        [System.Windows.MessageBox]::Show($msg, "Schowek") | Out-Null
     }
 })
 
@@ -4516,7 +4619,7 @@ $btnBuild.Add_Click({
         try {
             $out = Build-TranslationMod (Split-Path $script:EditingTranslationModPath -Parent)
             $script:LastWorkshopDescriptionPath = Join-Path $out "SteamWorkshopDescription.txt"
-            $btnCopyWorkshop.IsEnabled = (Test-Path $script:LastWorkshopDescriptionPath)
+            $btnCopyWorkshop.IsEnabled = $true
             $txtStatus.Text = if ($script:UiLanguage -eq "en") {
                 "Existing translation mod updated: $out"
             } else {
@@ -4540,7 +4643,7 @@ $btnBuild.Add_Click({
         try {
             $out = Build-TranslationMod $dlg.SelectedPath
             $script:LastWorkshopDescriptionPath = Join-Path $out "SteamWorkshopDescription.txt"
-            $btnCopyWorkshop.IsEnabled = (Test-Path $script:LastWorkshopDescriptionPath)
+            $btnCopyWorkshop.IsEnabled = $true
             $txtStatus.Text = if ($script:UiLanguage -eq "en") {
                 "Translation mod created: $out"
             } else {
@@ -4550,6 +4653,410 @@ $btnBuild.Add_Click({
         } catch {
             [System.Windows.MessageBox]::Show($_.Exception.Message,"Błąd")
         }
+    }
+})
+
+
+function Get-RimWorldGamePathAuto {
+    foreach ($loc in @(Find-RimWorldLocations)) {
+        if (Test-Path $loc.Game) { return $loc.Game }
+    }
+    return $null
+}
+
+function Get-RimWorldGameModules([string]$gamePath) {
+    $items = New-Object System.Collections.ArrayList
+    $dataPath = Join-Path $gamePath "Data"
+    if (-not (Test-Path $dataPath)) { return @() }
+
+    $preferred = @("Core","Royalty","Ideology","Biotech","Anomaly","Odyssey")
+    $dirs = @(Get-ChildItem -LiteralPath $dataPath -Directory -ErrorAction SilentlyContinue)
+
+    foreach ($name in $preferred) {
+        $match = $dirs | Where-Object { $_.Name -ieq $name } | Select-Object -First 1
+        if ($match) {
+            [void]$items.Add([pscustomobject]@{ Name=$match.Name; Path=$match.FullName; IsCore=($match.Name -ieq "Core") })
+        }
+    }
+
+    foreach ($d in $dirs) {
+        if ($items.Name -contains $d.Name) { continue }
+        if ((Test-Path (Join-Path $d.FullName "Languages")) -or (Test-Path (Join-Path $d.FullName "Defs"))) {
+            [void]$items.Add([pscustomobject]@{ Name=$d.Name; Path=$d.FullName; IsCore=$false })
+        }
+    }
+    return @($items)
+}
+
+function Load-RimWorldGameModules([string]$gamePath) {
+    $lstRimWorldGameModules.Items.Clear()
+    foreach ($m in @(Get-RimWorldGameModules $gamePath)) {
+        $item = New-Object System.Windows.Controls.ListBoxItem
+        $item.Content = $m.Name
+        $item.Tag = $m.Path
+        [void]$lstRimWorldGameModules.Items.Add($item)
+        if ($m.IsCore) { $item.IsSelected = $true }
+    }
+    Set-ControlTextSafe $txtRimWorldGameStatus "Wykryto moduły: $($lstRimWorldGameModules.Items.Count)."
+}
+
+
+
+function Get-RimWorldLanguageAliases([string]$languageCodeOrName) {
+    $wanted = $languageCodeOrName.ToLowerInvariant()
+    if ($wanted -eq "polish") {
+        return @("polish","polski","pl")
+    }
+    if ($wanted -eq "english") {
+        return @("english","en")
+    }
+    return @($wanted)
+}
+
+function Test-RimWorldLanguageNameMatch([string]$name, [string]$languageCodeOrName) {
+    if ([string]::IsNullOrWhiteSpace($name)) { return $false }
+
+    $n = $name.Trim().ToLowerInvariant()
+
+    foreach ($alias in @(Get-RimWorldLanguageAliases $languageCodeOrName)) {
+        $a = $alias.Trim().ToLowerInvariant()
+
+        # Exact match is always safe.
+        if ($n -eq $a) { return $true }
+
+        # Human-readable language names may appear as:
+        # "Polish (Polski)", "English (English)", etc.
+        if ($a.Length -gt 2) {
+            if ($n.StartsWith($a + " ") -or
+                $n.StartsWith($a + "(") -or
+                $n -match ('(^|[\s(_-])' + [regex]::Escape($a) + '([\s)_-]|$)')) {
+                return $true
+            }
+        } else {
+            # Short codes such as PL / EN must only match as standalone tokens.
+            # Never use Contains() here, otherwise "pl" matches "ChineseSimplified".
+            if ($n -match ('(^|[\s(_-])' + [regex]::Escape($a) + '([\s)_-]|$)')) {
+                return $true
+            }
+        }
+    }
+
+    return $false
+}
+
+function Expand-RimWorldLanguageArchive([string]$archivePath) {
+    if ([string]::IsNullOrWhiteSpace($archivePath) -or -not (Test-Path -LiteralPath $archivePath)) {
+        return $null
+    }
+
+    $tar = Get-Command tar.exe -ErrorAction SilentlyContinue
+    if ($null -eq $tar) {
+        throw "Nie znaleziono tar.exe. Nie można odczytać oficjalnego archiwum językowego RimWorlda:`n$archivePath"
+    }
+
+    $stamp = [System.IO.File]::GetLastWriteTimeUtc($archivePath).Ticks
+    $safeName = ([System.IO.Path]::GetFileNameWithoutExtension($archivePath) -replace '[^A-Za-z0-9._-]', '_')
+    $moduleName = ([System.IO.Directory]::GetParent([System.IO.Directory]::GetParent($archivePath).FullName).Name -replace '[^A-Za-z0-9._-]', '_')
+
+    $cacheRoot = Join-Path $env:TEMP "ModTranslationToolkit\RimWorldGame"
+    $target = Join-Path $cacheRoot "$moduleName-$safeName-$stamp"
+
+    if (-not (Test-Path -LiteralPath $target)) {
+        New-Item -ItemType Directory -Path $target -Force | Out-Null
+
+        try {
+            & $tar.Source -xf $archivePath -C $target 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                throw "tar.exe zakończył pracę z kodem $LASTEXITCODE."
+            }
+        } catch {
+            Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue
+            throw "Nie udało się rozpakować archiwum językowego:`n$archivePath`n`n$($_.Exception.Message)"
+        }
+    }
+
+    if ((Test-Path -LiteralPath (Join-Path $target "Keyed")) -or
+        (Test-Path -LiteralPath (Join-Path $target "DefInjected"))) {
+        return $target
+    }
+
+    foreach ($d in Get-ChildItem -LiteralPath $target -Directory -ErrorAction SilentlyContinue) {
+        if ((Test-Path -LiteralPath (Join-Path $d.FullName "Keyed")) -or
+            (Test-Path -LiteralPath (Join-Path $d.FullName "DefInjected"))) {
+            return $d.FullName
+        }
+    }
+
+    return $target
+}
+
+function Get-RimWorldLanguageFolder([string]$modulePath, [string]$languageCodeOrName) {
+    $languagesRoot = Join-Path $modulePath "Languages"
+    if (-not (Test-Path $languagesRoot)) { return $null }
+
+    $candidates = @(Get-ChildItem -LiteralPath $languagesRoot -ErrorAction SilentlyContinue)
+
+    # 1) Loose language directories.
+    foreach ($dir in @($candidates | Where-Object { $_.PSIsContainer })) {
+        if (Test-RimWorldLanguageNameMatch $dir.Name $languageCodeOrName) {
+            return $dir.FullName
+        }
+
+        $info = Join-Path $dir.FullName "LanguageInfo.xml"
+        if (Test-Path $info) {
+            try {
+                [xml]$xml = Get-Content -LiteralPath $info -Raw -Encoding UTF8
+                foreach ($value in @(
+                    $xml.LanguageInfo.friendlyNameNative,
+                    $xml.LanguageInfo.friendlyNameEnglish,
+                    $xml.LanguageInfo.languageCode,
+                    $xml.LanguageInfo.isoCode,
+                    $xml.LanguageInfo.folderName
+                )) {
+                    if (Test-RimWorldLanguageNameMatch ([string]$value) $languageCodeOrName) {
+                        return $dir.FullName
+                    }
+                }
+            } catch {}
+        }
+    }
+
+    # 2) Official RimWorld language archives, e.g. Polish (Polski).tar.
+    foreach ($file in @($candidates | Where-Object { -not $_.PSIsContainer -and $_.Extension -ieq ".tar" })) {
+        $baseName = [System.IO.Path]::GetFileNameWithoutExtension($file.Name)
+        if (Test-RimWorldLanguageNameMatch $baseName $languageCodeOrName) {
+            try {
+                $resolved = Expand-RimWorldLanguageArchive $file.FullName
+                return $resolved
+            } catch {
+                throw "Błąd odczytu języka '$baseName' w module '$modulePath': $($_.Exception.Message)"
+            }
+        }
+    }
+
+    return $null
+}
+
+function Read-RimWorldKeyedXml([string]$filePath, [string]$moduleName, [string]$languageName) {
+    $rows = New-Object System.Collections.ArrayList
+    try {
+        [xml]$xml = Get-Content -LiteralPath $filePath -Raw -Encoding UTF8
+        if (-not $xml.LanguageData) { return @() }
+
+        foreach ($node in $xml.LanguageData.ChildNodes) {
+            if ($node.NodeType -ne [System.Xml.XmlNodeType]::Element) { continue }
+
+            [void]$rows.Add([pscustomobject]@{
+                Module = $moduleName
+                Type = "Keyed"
+                File = $filePath
+                Key = [string]$node.Name
+                Source = $(if ($languageName -eq "English") { [string]$node.InnerText } else { "" })
+                Translation = $(if ($languageName -eq "Polish") { [string]$node.InnerText } else { "" })
+            })
+        }
+    } catch {}
+    return @($rows)
+}
+
+function Read-RimWorldDefInjectedXml([string]$filePath, [string]$moduleName, [string]$languageName, [string]$langRoot) {
+    $rows = New-Object System.Collections.ArrayList
+    try {
+        [xml]$xml = Get-Content -LiteralPath $filePath -Raw -Encoding UTF8
+        if (-not $xml.LanguageData) { return @() }
+
+        $rel = ""
+        try { $rel = $filePath.Substring($langRoot.Length).TrimStart('\','/') } catch {}
+        $defType = ""
+        if ($rel -match 'DefInjected[\\/]+([^\\/]+)') { $defType = $matches[1] }
+
+        foreach ($node in $xml.LanguageData.ChildNodes) {
+            if ($node.NodeType -ne [System.Xml.XmlNodeType]::Element) { continue }
+
+            [void]$rows.Add([pscustomobject]@{
+                Module = $moduleName
+                Type = $(if ([string]::IsNullOrWhiteSpace($defType)) { "DefInjected" } else { "DefInjected/$defType" })
+                File = $filePath
+                Key = [string]$node.Name
+                Source = $(if ($languageName -eq "English") { [string]$node.InnerText } else { "" })
+                Translation = $(if ($languageName -eq "Polish") { [string]$node.InnerText } else { "" })
+            })
+        }
+    } catch {}
+    return @($rows)
+}
+
+function Get-RimWorldLanguageEntries([string]$langRoot, [string]$moduleName, [string]$languageName) {
+    $rows = New-Object System.Collections.ArrayList
+    if ([string]::IsNullOrWhiteSpace($langRoot) -or -not (Test-Path $langRoot)) { return @() }
+
+    $keyed = Join-Path $langRoot "Keyed"
+    if (Test-Path $keyed) {
+        foreach ($f in Get-ChildItem -LiteralPath $keyed -Filter *.xml -File -Recurse -ErrorAction SilentlyContinue) {
+            foreach ($r in @(Read-RimWorldKeyedXml $f.FullName $moduleName $languageName)) {
+                [void]$rows.Add($r)
+            }
+        }
+    }
+
+    $defInjected = Join-Path $langRoot "DefInjected"
+    if (Test-Path $defInjected) {
+        foreach ($f in Get-ChildItem -LiteralPath $defInjected -Filter *.xml -File -Recurse -ErrorAction SilentlyContinue) {
+            foreach ($r in @(Read-RimWorldDefInjectedXml $f.FullName $moduleName $languageName $langRoot)) {
+                [void]$rows.Add($r)
+            }
+        }
+    }
+
+    return @($rows)
+}
+
+function Get-RimWorldEntryIdentity($entry) {
+    return "$($entry.Module)|$($entry.Type)|$($entry.Key)"
+}
+
+function Scan-RimWorldGameSelection {
+    $selected = @($lstRimWorldGameModules.SelectedItems)
+    if ($selected.Count -eq 0) {
+        [System.Windows.MessageBox]::Show("Zaznacz co najmniej jeden moduł / DLC.","RimWorld Game") | Out-Null
+        return
+    }
+
+    $result = New-Object System.Collections.ArrayList
+    $statusLines = New-Object System.Collections.ArrayList
+    $totalEnglish = 0
+    $totalPolish = 0
+    $matched = 0
+
+    foreach ($item in $selected) {
+        $moduleName = [string]$item.Content
+        $modulePath = [string]$item.Tag
+
+        $englishRoot = Get-RimWorldLanguageFolder $modulePath "english"
+        $polishRoot  = Get-RimWorldLanguageFolder $modulePath "polish"
+
+        $englishEntries = @(Get-RimWorldLanguageEntries $englishRoot $moduleName "English")
+        $polishEntries  = @(Get-RimWorldLanguageEntries $polishRoot  $moduleName "Polish")
+
+        $totalEnglish += $englishEntries.Count
+        $totalPolish += $polishEntries.Count
+
+        $polishMap = @{}
+        foreach ($p in $polishEntries) {
+            $polishMap[(Get-RimWorldEntryIdentity $p)] = [string]$p.Translation
+        }
+
+        $moduleMatched = 0
+        foreach ($e in $englishEntries) {
+            $id = Get-RimWorldEntryIdentity $e
+            if ($polishMap.ContainsKey($id)) {
+                $e.Translation = [string]$polishMap[$id]
+                $moduleMatched++
+                $matched++
+            }
+            [void]$result.Add($e)
+        }
+
+        $polishState = if ($polishRoot) {
+            "PL znaleziony: $moduleMatched/$($englishEntries.Count)"
+        } else {
+            "PL NIE znaleziony"
+        }
+
+        $plSource = if ($polishRoot) { $polishRoot } else { "(brak)" }
+        [void]$statusLines.Add("$moduleName — EN: $($englishEntries.Count), $polishState`r`nŹródło PL: $plSource")
+    }
+
+    $rimWorldGameGrid.ItemsSource = $null
+    $rimWorldGameGrid.ItemsSource = @($result)
+
+    Set-ControlTextSafe $lblRimWorldGameCount "Wpisy: $($result.Count) | PL: $matched"
+    Set-ControlTextSafe $txtRimWorldGameStatus "Skan zakończony. EN: $totalEnglish, PL znalezione: $totalPolish, dopasowane: $matched."
+
+    $details = ($statusLines -join "`r`n")
+    if (-not [string]::IsNullOrWhiteSpace($details)) {
+        $txtRimWorldGameStatus.ToolTip = $details
+    }
+}
+
+$btnDetectRimWorldGame.Add_Click({
+    $p = Get-RimWorldGamePathAuto
+    if ([string]::IsNullOrWhiteSpace([string]$p)) {
+        [System.Windows.MessageBox]::Show("Nie wykryto instalacji RimWorld.","RimWorld Game") | Out-Null
+        return
+    }
+    $txtRimWorldGamePath.Text = $p
+    Load-RimWorldGameModules $p
+})
+
+$btnChooseRimWorldGame.Add_Click({
+    $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dlg.Description = "Wybierz główny folder RimWorld"
+    if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        $txtRimWorldGamePath.Text = $dlg.SelectedPath
+        Load-RimWorldGameModules $dlg.SelectedPath
+    }
+})
+
+$btnOpenRimWorldGameFolder.Add_Click({
+    if (Test-ExistingFolderSafe $txtRimWorldGamePath.Text) {
+        Start-Process explorer.exe -ArgumentList @($txtRimWorldGamePath.Text)
+    }
+})
+
+$txtRimWorldGamePath.Add_KeyDown({
+    if ($_.Key -eq [System.Windows.Input.Key]::Enter) {
+        if (Test-ExistingFolderSafe $txtRimWorldGamePath.Text) { Load-RimWorldGameModules $txtRimWorldGamePath.Text }
+    }
+})
+$txtRimWorldGamePath.Add_Drop({
+    if ($_.Data.GetDataPresent([System.Windows.DataFormats]::FileDrop)) {
+        $paths = @($_.Data.GetData([System.Windows.DataFormats]::FileDrop))
+        if ($paths.Count -gt 0 -and (Test-ExistingFolderSafe $paths[0])) {
+            $txtRimWorldGamePath.Text = $paths[0]
+            Load-RimWorldGameModules $paths[0]
+        }
+    }
+})
+
+$btnRwGameSelectAll.Add_Click({
+    $lstRimWorldGameModules.SelectAll()
+})
+$btnRwGameCoreOnly.Add_Click({
+    $lstRimWorldGameModules.UnselectAll()
+    foreach ($i in $lstRimWorldGameModules.Items) {
+        if ([string]$i.Content -ieq "Core") { $i.IsSelected = $true }
+    }
+})
+$btnRwGameDlcOnly.Add_Click({
+    $lstRimWorldGameModules.UnselectAll()
+    foreach ($i in $lstRimWorldGameModules.Items) {
+        if ([string]$i.Content -ine "Core") { $i.IsSelected = $true }
+    }
+})
+$btnScanRimWorldGame.Add_Click({
+    try {
+        $btnScanRimWorldGame.IsEnabled = $false
+        Set-ControlTextSafe $txtRimWorldGameStatus "Skanowanie RimWorld Game..."
+        [System.Windows.Forms.Application]::DoEvents()
+
+        Scan-RimWorldGameSelection
+    } catch {
+        $msg = if ($script:UiLanguage -eq "en") {
+            "RimWorld Game scan failed.`n`n$($_.Exception.Message)"
+        } else {
+            "Skan RimWorld Game nie powiódł się.`n`n$($_.Exception.Message)"
+        }
+
+        Set-ControlTextSafe $txtRimWorldGameStatus $msg
+        [System.Windows.MessageBox]::Show(
+            $msg,
+            "RimWorld Game",
+            [System.Windows.MessageBoxButton]::OK,
+            [System.Windows.MessageBoxImage]::Error
+        ) | Out-Null
+    } finally {
+        $btnScanRimWorldGame.IsEnabled = $true
     }
 })
 
@@ -4575,7 +5082,9 @@ $btnUseSelected.Add_Click({
         if ($translationInfo.IsTranslationMod) {
             $edit = Open-ExistingTranslationMod ([string]$m.Path)
             $txtModPath.Text = [string]$edit.Original.Path
-            $window.Content.Children[1].SelectedIndex = 0
+            $window.Content.Children[1].SelectedItem = $tabGameProfiles
+            $tabGameProfilesInner.SelectedItem = $tabRimWorldMod
+            $tabRimWorldModInner.SelectedItem = $tabTranslation
             Refresh-LanguageCoverageUi
             $txtStatus.Text = if ($script:UiLanguage -eq "en") {
                 "Editing: $($translationInfo.Name). Loaded $($edit.Loaded)/$($edit.Total) existing entries. Original: $($edit.Original.Name). Resolved via: $($edit.ResolveMethod)."
@@ -4590,7 +5099,9 @@ $btnUseSelected.Add_Click({
             $txtModPath.Text = $m.Path
             $scan = Analyze-Mod $m.Path
             Apply-CreatorProfileToTranslator
-            $window.Content.Children[1].SelectedIndex = 0
+            $window.Content.Children[1].SelectedItem = $tabGameProfiles
+            $tabGameProfilesInner.SelectedItem = $tabRimWorldMod
+            $tabRimWorldModInner.SelectedItem = $tabTranslation
             $txtStatus.Text = "Wybrano: $($m.Name). Wpisy: $($scan.Total). Automatycznie podstawiono istniejących: $($scan.AutoLoadedExisting). KeyBindingDef: $($scan.KeyBindingDefs), diagnostyka UI: $($scan.KeyBindingDiagnostics). Oryginał można zaznaczać i kopiować Ctrl+C."
             Refresh-LanguageCoverageUi
         }
