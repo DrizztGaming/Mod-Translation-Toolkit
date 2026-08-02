@@ -24,3 +24,14 @@ Suggested structure:
 - `src/Profiles/Generic/`
 
 A later native Windows build can replace the PowerShell front end while keeping the profile concept.
+
+
+## Kenshi profile
+
+The initial Kenshi profile targets the base game only.
+
+- UI gettext: `locale/en_GB/LC_MESSAGES/main.po` -> `locale/pl_PL/LC_MESSAGES/main.po` + `main.mo`.
+- FCS data: `__translations/base/gamedata.pot` and `dialogue/*.pot` -> `__translations/pl_PL/*.po`.
+- The final `pl_PL.translation` is built in Forgotten Construction Set.
+
+Kenshi mod localization is deferred until the base-game workflow is stable.

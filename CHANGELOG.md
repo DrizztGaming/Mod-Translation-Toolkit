@@ -1,5 +1,42 @@
 # Changelog
 
+## 0.3.2 - 2026-08-02
+
+### Fixed
+- Fixed intermittent `CLIPBRD_E_CANT_OPEN (0x800401D0)` errors when copying the Steam Workshop description.
+- Clipboard writes now retry several times with short delays when another Windows process temporarily locks the clipboard.
+- Added a WinForms clipboard fallback after WPF clipboard retries.
+- The same safer clipboard routine is also used when copying source/original text from the translation grid.
+
+## 0.3.1 - 2026-08-02
+
+### Fixed
+- Kenshi UI scanning now checks `locale/en/LC_MESSAGES/main.pot` and `main.po` first, with additional English locale fallbacks.
+- The profile no longer assumes `en_GB/main.po` as the only UI source.
+
+### Changed
+- Kenshi UI can be translated without an FCS export.
+- Missing FCS export now shows a clear informational status.
+- Added a **How to export data with FCS?** help button.
+
+## 0.3.0 - 2026-08-02
+
+### Added
+- First **Kenshi** game profile, focused only on translating the base game.
+- Detects Kenshi through Steam AppID `233860`.
+- Reads UI strings from the English gettext `LC_MESSAGES/main.po`.
+- Reads FCS base-game exports from `__translations/base/gamedata.pot` and `__translations/base/dialogue`.
+- Loads existing Polish `pl_PL` PO work when present.
+- Supports manual editing, automatic EN -> PL translation, CSV export/import and source-text copying.
+- Generates `locale/pl_PL/LC_MESSAGES/main.po` and compiles `main.mo`.
+- Prepares `__translations/pl_PL/gamedata.po` and dialogue PO files for FCS Build.
+- Creates backups before overwriting existing Kenshi PO/MO files.
+
+### Known limitation
+- Kenshi's binary `pl_PL.translation` still has to be built with Forgotten Construction Set (FCS).
+- Plural gettext entries are skipped for now rather than being rewritten incorrectly.
+- Kenshi mod translation is not part of this first profile.
+
 ## 0.2.8 - 2026-08-01
 
 ### Fixed

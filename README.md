@@ -2,12 +2,15 @@
 
 A Windows desktop helper for translating game mods.
 
-> **Current release:** v0.2.8  
+> **Current release:** v0.3.2  
 > **Currently supported game:** RimWorld
 
 The project started as a small RimWorld translation helper and is being prepared as a multi-game toolkit with separate game profiles.
 
 ## Features
+
+- **Kenshi base-game profile**: detects Steam installation, scans UI gettext `main.pot` / `main.po`, scans FCS-exported `gamedata.pot` and dialogue POT files, loads existing `pl_PL` work, supports manual/automatic translation and CSV, writes `main.po` + `main.mo`, and prepares `__translations\pl_PL` for FCS Build.
+- Kenshi mod translation is intentionally not enabled yet; v0.3.0 focuses only on the base game.
 
 - Existing translation editing can resolve the original mod through `modDependencies`, `loadAfter/loadBefore`, common translation packageId suffixes, or the cleaned base mod name.
 

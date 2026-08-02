@@ -7,7 +7,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-$AppVersion = "0.2.8"
+$AppVersion = "0.3.2"
 $script:UiLanguage = "pl"
 $script:Entries = New-Object System.Collections.ArrayList
 $script:Mods = New-Object System.Collections.ArrayList
@@ -28,6 +28,11 @@ $script:EditingTranslationPackageId = ""
 $script:EditingTranslationName = ""
 $script:SelectedContentVersion = ""
 $script:EntryKeys = @{}
+$script:KenshiEntries = New-Object System.Collections.ArrayList
+$script:KenshiRoot = ""
+$script:KenshiUiSource = ""
+$script:KenshiFcsBase = ""
+$script:KenshiSkippedPlural = 0
 
 
 # ---------- Core helpers ----------
@@ -1826,11 +1831,444 @@ $btnLangPL.Add_Click({ $script:UiLanguage = "pl"; $langWindow.DialogResult = $tr
 $btnLangEN.Add_Click({ $script:UiLanguage = "en"; $langWindow.DialogResult = $true; $langWindow.Close() })
 $null = $langWindow.ShowDialog()
 
+
+# ---------- Kenshi base-game profile ----------
+function Get-KenshiInstallPath {
+    foreach ($lib in @(Get-SteamLibraries)) {
+        $manifest = Join-Path $lib "steamapps\appmanifest_233860.acf"
+        if (Test-Path $manifest) {
+            try {
+                $raw = Get-Content -LiteralPath $manifest -Raw
+                $m = [regex]::Match($raw, '"installdir"\s+"([^"]+)"')
+                if ($m.Success) {
+                    $candidate = Join-Path $lib ("steamapps\common\" + $m.Groups[1].Value)
+                    if (Test-Path $candidate) { return $candidate }
+                }
+            } catch {}
+        }
+        $fallback = Join-Path $lib "steamapps\common\Kenshi"
+        if (Test-Path $fallback) { return $fallback }
+    }
+    return ""
+}
+
+function ConvertFrom-PoQuoted([string]$s) {
+    if ($null -eq $s) { return "" }
+    $v = $s.Trim()
+    if ($v.StartsWith('"') -and $v.EndsWith('"') -and $v.Length -ge 2) {
+        $v = $v.Substring(1, $v.Length - 2)
+    }
+    try { return [regex]::Unescape($v) }
+    catch { return $v.Replace('\"','"').Replace('\\','\') }
+}
+
+function ConvertTo-PoQuoted([string]$s) {
+    if ($null -eq $s) { $s = "" }
+    $v = $s.Replace('\','\\').Replace('"','\"').Replace("`r","").Replace("`n",'\n')
+    return '"' + $v + '"'
+}
+
+function Read-KenshiPoFile([string]$path, [string]$relativeFile, [string]$kind) {
+    $result = New-Object System.Collections.ArrayList
+    if (-not (Test-Path $path)) { return @($result) }
+
+    $lines = @(Get-Content -LiteralPath $path -Encoding UTF8)
+    $blocks = New-Object System.Collections.ArrayList
+    $current = New-Object System.Collections.ArrayList
+
+    foreach ($line in $lines) {
+        if ([string]::IsNullOrWhiteSpace($line)) {
+            if ($current.Count -gt 0) {
+                [void]$blocks.Add(@($current))
+                $current = New-Object System.Collections.ArrayList
+            }
+        } else {
+            [void]$current.Add($line)
+        }
+    }
+    if ($current.Count -gt 0) { [void]$blocks.Add(@($current)) }
+
+    $index = 0
+    foreach ($block in @($blocks)) {
+        $index++
+        $comments = New-Object System.Collections.ArrayList
+        $context = ""
+        $msgid = ""
+        $msgstr = ""
+        $plural = $false
+        $field = ""
+
+        foreach ($line in @($block)) {
+            $trim = $line.Trim()
+            if ($trim.StartsWith('#')) { [void]$comments.Add($line); continue }
+
+            if ($trim -match '^msgctxt\s+(.+)$') {
+                $field = "context"; $context = ConvertFrom-PoQuoted $Matches[1]; continue
+            }
+            if ($trim -match '^msgid_plural\s+(.+)$') {
+                $plural = $true; $field = "plural"; continue
+            }
+            if ($trim -match '^msgid\s+(.+)$') {
+                $field = "msgid"; $msgid = ConvertFrom-PoQuoted $Matches[1]; continue
+            }
+            if ($trim -match '^msgstr(?:\[[0-9]+\])?\s+(.+)$') {
+                if ($trim -match '^msgstr\[') { $plural = $true }
+                $field = "msgstr"; $msgstr = ConvertFrom-PoQuoted $Matches[1]; continue
+            }
+            if ($trim.StartsWith('"')) {
+                $piece = ConvertFrom-PoQuoted $trim
+                switch ($field) {
+                    "context" { $context += $piece }
+                    "msgid" { $msgid += $piece }
+                    "msgstr" { $msgstr += $piece }
+                }
+            }
+        }
+
+        if ([string]::IsNullOrEmpty($msgid)) { continue }
+        if ($plural) { $script:KenshiSkippedPlural++; continue }
+
+        $key = if (-not [string]::IsNullOrWhiteSpace($context)) { $context } else { "$relativeFile#$index" }
+        [void]$result.Add([pscustomobject]@{
+            Kind = $kind
+            File = $relativeFile
+            Key = $key
+            Context = $context
+            Source = $msgid
+            Translation = $msgstr
+            Comments = @($comments)
+        })
+    }
+    return @($result)
+}
+
+function Get-KenshiEntryIdentity($entry) {
+    $ctx = [string]$entry.Context
+    if ([string]::IsNullOrWhiteSpace($ctx)) {
+        return ("$($entry.File)|$($entry.Source)").ToLowerInvariant()
+    }
+    return ("$($entry.File)|$ctx|$($entry.Source)").ToLowerInvariant()
+}
+
+function Read-KenshiExistingTranslationMap([string]$root) {
+    $map = @{}
+    $ui = Join-Path $root "locale\pl_PL\LC_MESSAGES\main.po"
+    foreach ($e in @(Read-KenshiPoFile $ui "LC_MESSAGES\main.po" "UI")) {
+        $map[(Get-KenshiEntryIdentity $e)] = $e.Translation
+    }
+
+    $work = Join-Path $root "__translations\pl_PL"
+    if (Test-Path $work) {
+        $game = Join-Path $work "gamedata.po"
+        foreach ($e in @(Read-KenshiPoFile $game "gamedata.po" "GameData")) {
+            $map[(Get-KenshiEntryIdentity $e)] = $e.Translation
+        }
+
+        $dialogue = Join-Path $work "dialogue"
+        if (Test-Path $dialogue) {
+            Get-ChildItem -LiteralPath $dialogue -Filter *.po -File -Recurse -ErrorAction SilentlyContinue | ForEach-Object {
+                $rel = "dialogue\" + $_.FullName.Substring($dialogue.Length).TrimStart('\','/')
+                foreach ($e in @(Read-KenshiPoFile $_.FullName $rel "Dialogue")) {
+                    $map[(Get-KenshiEntryIdentity $e)] = $e.Translation
+                }
+            }
+        }
+    }
+    return $map
+}
+
+function Refresh-KenshiGrid {
+    $kenshiGrid.ItemsSource = $null
+    $kenshiGrid.ItemsSource = @($script:KenshiEntries)
+    $lblKenshiCount.Content = "Wpisy: $($script:KenshiEntries.Count)"
+}
+
+function Scan-KenshiBase([string]$root) {
+    if ([string]::IsNullOrWhiteSpace($root) -or -not (Test-Path $root)) {
+        throw "Nie znaleziono folderu Kenshi."
+    }
+
+    $script:KenshiEntries.Clear()
+    $script:KenshiRoot = $root
+    $script:KenshiSkippedPlural = 0
+    $script:KenshiUiSource = ""
+    $script:KenshiFcsBase = ""
+
+    $uiCandidates = @(
+        (Join-Path $root "locale\en\LC_MESSAGES\main.pot"),
+        (Join-Path $root "locale\en\LC_MESSAGES\main.po"),
+        (Join-Path $root "locale\en_GB\LC_MESSAGES\main.pot"),
+        (Join-Path $root "locale\en_GB\LC_MESSAGES\main.po"),
+        (Join-Path $root "locale\en-GB\LC_MESSAGES\main.pot"),
+        (Join-Path $root "locale\en-GB\LC_MESSAGES\main.po"),
+        (Join-Path $root "locale\en_US\LC_MESSAGES\main.pot"),
+        (Join-Path $root "locale\en_US\LC_MESSAGES\main.po")
+    )
+    $ui = $uiCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+
+    if (-not $ui -and (Test-Path (Join-Path $root "locale"))) {
+        $ui = Get-ChildItem -LiteralPath (Join-Path $root "locale") -File -Recurse -ErrorAction SilentlyContinue |
+              Where-Object {
+                  $_.Name -in @("main.pot","main.po") -and
+                  $_.FullName -match '[\\/]en([_\-][A-Za-z]+)?[\\/]LC_MESSAGES[\\/]'
+              } |
+              Select-Object -First 1 -ExpandProperty FullName
+    }
+
+    if ($ui) {
+        $script:KenshiUiSource = $ui
+        foreach ($e in @(Read-KenshiPoFile $ui "LC_MESSAGES\main.po" "UI")) {
+            [void]$script:KenshiEntries.Add($e)
+        }
+    }
+
+    $base = Join-Path $root "__translations\base"
+    if (Test-Path $base) {
+        $script:KenshiFcsBase = $base
+        $gamedata = Join-Path $base "gamedata.pot"
+        if (-not (Test-Path $gamedata)) { $gamedata = Join-Path $base "gamedata.po" }
+
+        if (Test-Path $gamedata) {
+            foreach ($e in @(Read-KenshiPoFile $gamedata "gamedata.po" "GameData")) {
+                [void]$script:KenshiEntries.Add($e)
+            }
+        }
+
+        $dialogue = Join-Path $base "dialogue"
+        if (Test-Path $dialogue) {
+            Get-ChildItem -LiteralPath $dialogue -File -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { $_.Extension -in @(".pot",".po") } |
+                ForEach-Object {
+                    $relTail = $_.FullName.Substring($dialogue.Length).TrimStart('\','/')
+                    $rel = "dialogue\$([System.IO.Path]::ChangeExtension($relTail,'.po'))"
+                    foreach ($e in @(Read-KenshiPoFile $_.FullName $rel "Dialogue")) {
+                        [void]$script:KenshiEntries.Add($e)
+                    }
+                }
+        }
+    }
+
+    $existing = Read-KenshiExistingTranslationMap $root
+    $loaded = 0
+    foreach ($e in @($script:KenshiEntries)) {
+        $id = Get-KenshiEntryIdentity $e
+        if ($existing.ContainsKey($id) -and -not [string]::IsNullOrWhiteSpace([string]$existing[$id])) {
+            $e.Translation = [string]$existing[$id]
+            $loaded++
+        }
+    }
+
+    Refresh-KenshiGrid
+    return [pscustomobject]@{
+        Total = $script:KenshiEntries.Count
+        UiFound = -not [string]::IsNullOrWhiteSpace($script:KenshiUiSource)
+        FcsExportFound = -not [string]::IsNullOrWhiteSpace($script:KenshiFcsBase)
+        ExistingLoaded = $loaded
+        SkippedPlural = $script:KenshiSkippedPlural
+    }
+}
+
+function Write-KenshiPoFile([string]$path, $entries, [string]$languageCode="pl_PL") {
+    New-Item -ItemType Directory -Path (Split-Path $path -Parent) -Force | Out-Null
+    $sb = New-Object System.Text.StringBuilder
+    [void]$sb.AppendLine('# Generated/updated with Mod Translation Toolkit')
+    [void]$sb.AppendLine('msgid ""')
+    [void]$sb.AppendLine('msgstr ""')
+    [void]$sb.AppendLine('"Content-Type: text/plain; charset=UTF-8\n"')
+    [void]$sb.AppendLine('"Language: ' + $languageCode + '\n"')
+    [void]$sb.AppendLine('')
+
+    foreach ($e in @($entries)) {
+        foreach ($c in @($e.Comments)) {
+            if (-not [string]::IsNullOrWhiteSpace([string]$c)) { [void]$sb.AppendLine([string]$c) }
+        }
+        if (-not [string]::IsNullOrWhiteSpace([string]$e.Context)) {
+            [void]$sb.AppendLine("msgctxt $(ConvertTo-PoQuoted ([string]$e.Context))")
+        }
+        [void]$sb.AppendLine("msgid $(ConvertTo-PoQuoted ([string]$e.Source))")
+        [void]$sb.AppendLine("msgstr $(ConvertTo-PoQuoted ([string]$e.Translation))")
+        [void]$sb.AppendLine('')
+    }
+    [System.IO.File]::WriteAllText($path, $sb.ToString(), (New-Object System.Text.UTF8Encoding($false)))
+}
+
+function Write-KenshiMoFile([string]$path, $entries) {
+    $pairs = New-Object System.Collections.ArrayList
+    [void]$pairs.Add([pscustomobject]@{ Id=""; Str="Content-Type: text/plain; charset=UTF-8`nLanguage: pl_PL`n" })
+
+    foreach ($e in @($entries)) {
+        $id = [string]$e.Source
+        $str = [string]$e.Translation
+        if ([string]::IsNullOrWhiteSpace($str)) { $str = $id }
+        [void]$pairs.Add([pscustomobject]@{ Id=$id; Str=$str })
+    }
+
+    $pairs = @($pairs | Sort-Object Id)
+    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    $n = $pairs.Count
+    $headerSize = 28
+    $origTable = $headerSize
+    $transTable = $origTable + ($n * 8)
+    $dataOffset = $transTable + ($n * 8)
+
+    $origBytes = @()
+    $transBytes = @()
+    foreach ($p in $pairs) {
+        $origBytes += ,($utf8.GetBytes([string]$p.Id))
+        $transBytes += ,($utf8.GetBytes([string]$p.Str))
+    }
+
+    $origMeta = @()
+    $transMeta = @()
+    $cursor = $dataOffset
+    foreach ($b in $origBytes) { $origMeta += ,@($b.Length, $cursor); $cursor += $b.Length + 1 }
+    foreach ($b in $transBytes) { $transMeta += ,@($b.Length, $cursor); $cursor += $b.Length + 1 }
+
+    New-Item -ItemType Directory -Path (Split-Path $path -Parent) -Force | Out-Null
+    $fs = [System.IO.File]::Open($path, [System.IO.FileMode]::Create, [System.IO.FileAccess]::Write)
+    $bw = New-Object System.IO.BinaryWriter($fs)
+    try {
+        $bw.Write([uint32]0x950412de)
+        $bw.Write([uint32]0)
+        $bw.Write([uint32]$n)
+        $bw.Write([uint32]$origTable)
+        $bw.Write([uint32]$transTable)
+        $bw.Write([uint32]0)
+        $bw.Write([uint32]0)
+
+        foreach ($m in $origMeta) { $bw.Write([uint32]$m[0]); $bw.Write([uint32]$m[1]) }
+        foreach ($m in $transMeta) { $bw.Write([uint32]$m[0]); $bw.Write([uint32]$m[1]) }
+        foreach ($b in $origBytes) { $bw.Write($b); $bw.Write([byte]0) }
+        foreach ($b in $transBytes) { $bw.Write($b); $bw.Write([byte]0) }
+    } finally {
+        $bw.Close()
+        $fs.Close()
+    }
+}
+
+function Backup-KenshiFile([string]$path) {
+    if (-not (Test-Path $path)) { return }
+    $stamp = Get-Date -Format "yyyyMMdd-HHmmss"
+    Copy-Item -LiteralPath $path -Destination "$path.mtt-backup-$stamp" -Force
+}
+
+function Build-KenshiBaseTranslation([string]$root) {
+    if ($script:KenshiEntries.Count -eq 0) { throw "Najpierw zeskanuj podstawę Kenshi." }
+
+    $uiEntries = @($script:KenshiEntries | Where-Object { $_.Kind -eq "UI" })
+    $gameEntries = @($script:KenshiEntries | Where-Object { $_.Kind -eq "GameData" })
+    $dialogueEntries = @($script:KenshiEntries | Where-Object { $_.Kind -eq "Dialogue" })
+
+    $localeRoot = Join-Path $root "locale\pl_PL"
+    $uiPo = Join-Path $localeRoot "LC_MESSAGES\main.po"
+    $uiMo = Join-Path $localeRoot "LC_MESSAGES\main.mo"
+
+    if ($uiEntries.Count -gt 0) {
+        Backup-KenshiFile $uiPo
+        Backup-KenshiFile $uiMo
+        Write-KenshiPoFile $uiPo $uiEntries
+        Write-KenshiMoFile $uiMo $uiEntries
+    }
+
+    $workRoot = Join-Path $root "__translations\pl_PL"
+    if ($gameEntries.Count -gt 0) {
+        $gamePath = Join-Path $workRoot "gamedata.po"
+        Backup-KenshiFile $gamePath
+        Write-KenshiPoFile $gamePath $gameEntries
+    }
+
+    foreach ($g in @($dialogueEntries | Group-Object File)) {
+        $dest = Join-Path $workRoot $g.Name
+        Backup-KenshiFile $dest
+        Write-KenshiPoFile $dest $g.Group
+    }
+
+    $instructions = @"
+Mod Translation Toolkit v$AppVersion
+Kenshi base-game translation workspace
+Target: pl_PL
+
+UI:
+- locale\pl_PL\LC_MESSAGES\main.po
+- locale\pl_PL\LC_MESSAGES\main.mo
+
+Game data / dialogues:
+- __translations\pl_PL\gamedata.po
+- __translations\pl_PL\dialogue\*.po
+
+IMPORTANT:
+Kenshi's gameplay/data localization must still be compiled by Forgotten Construction Set (FCS).
+Open FCS -> Translations, select pl_PL and use Build.
+The resulting pl_PL.translation should be copied to:
+locale\pl_PL\pl_PL.translation
+
+Toolkit created backups before overwriting existing PO/MO files.
+"@
+    New-Item -ItemType Directory -Path $localeRoot -Force | Out-Null
+    [System.IO.File]::WriteAllText((Join-Path $localeRoot "ModTranslationToolkit-Kenshi.txt"), $instructions, (New-Object System.Text.UTF8Encoding($false)))
+    return $localeRoot
+}
+
+function Export-KenshiCsv([string]$path) {
+    @($script:KenshiEntries) | Select-Object Kind,File,Key,Context,Source,Translation |
+        Export-Csv -LiteralPath $path -NoTypeInformation -Encoding UTF8
+}
+
+function Import-KenshiCsv([string]$path) {
+    $rows = @(Import-Csv -LiteralPath $path)
+    $map = @{}
+    foreach ($r in $rows) {
+        $ctx = [string]$r.Context
+        $id = if ([string]::IsNullOrWhiteSpace($ctx)) {
+            ("$($r.File)|$($r.Source)").ToLowerInvariant()
+        } else {
+            ("$($r.File)|$ctx|$($r.Source)").ToLowerInvariant()
+        }
+        $map[$id] = [string]$r.Translation
+    }
+
+    $loaded = 0
+    foreach ($e in @($script:KenshiEntries)) {
+        $id = Get-KenshiEntryIdentity $e
+        if ($map.ContainsKey($id)) { $e.Translation = [string]$map[$id]; $loaded++ }
+    }
+    Refresh-KenshiGrid
+    return $loaded
+}
+
+
+
+function Set-ClipboardTextSafe([string]$text, [int]$maxAttempts = 8, [int]$delayMs = 80) {
+    if ($null -eq $text) { $text = "" }
+
+    $lastError = $null
+    for ($attempt = 1; $attempt -le $maxAttempts; $attempt++) {
+        try {
+            # SetDataObject with persistence is more tolerant than a single SetText call.
+            [System.Windows.Clipboard]::SetDataObject($text, $true)
+            return $true
+        } catch {
+            $lastError = $_.Exception
+            Start-Sleep -Milliseconds $delayMs
+            try { [System.Windows.Forms.Application]::DoEvents() } catch {}
+        }
+    }
+
+    # Final fallback through WinForms clipboard API.
+    try {
+        [System.Windows.Forms.Clipboard]::SetText($text)
+        return $true
+    } catch {
+        if ($null -ne $lastError) { throw $lastError }
+        throw
+    }
+}
+
 # ---------- Dark / Mrokar purple UI ----------
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Mod Translation Toolkit v0.2.8"
+        Title="Mod Translation Toolkit v0.3.2"
         Height="840" Width="1260"
         WindowStartupLocation="CenterScreen"
         Background="#121018"
@@ -1968,7 +2406,7 @@ $null = $langWindow.ShowDialog()
           <TextBlock Text="RimWorld profile • dark Mrokar theme" Foreground="#AFA2C0" FontSize="12"/>
         </StackPanel>
         <Border Grid.Column="1" Background="#2B2038" CornerRadius="5" Padding="10,5" VerticalAlignment="Center">
-          <TextBlock Text="v0.2.8" Foreground="#CDA8F2" FontWeight="SemiBold"/>
+          <TextBlock Text="v0.3.2" Foreground="#CDA8F2" FontWeight="SemiBold"/>
         </Border>
       </Grid>
     </Border>
@@ -2129,6 +2567,66 @@ $null = $langWindow.ShowDialog()
         </Grid>
       </TabItem>
 
+      <TabItem Name="tabKenshi" Header="Kenshi">
+        <Grid Margin="12" Background="{StaticResource Bg}">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
+
+          <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
+            <Button Name="btnDetectKenshi" Content="Wykryj Kenshi"/>
+            <Button Name="btnChooseKenshi" Content="Wybierz folder Kenshi"/>
+            <TextBox Name="txtKenshiPath" Width="650" Margin="8,0"/>
+            <Button Name="btnOpenKenshiFolder" Content="Otwórz folder"/>
+          </StackPanel>
+
+          <Border Grid.Row="1" Background="#211A2B" BorderBrush="#4A385D" BorderThickness="1" CornerRadius="6" Padding="10" Margin="0,0,0,10">
+            <StackPanel>
+              <TextBlock Text="Kenshi — tłumaczenie podstawowej gry" FontSize="18" FontWeight="SemiBold" Foreground="#CDA8F2"/>
+              <TextBlock Text="UI: locale\en\LC_MESSAGES\main.pot/main.po. Dane gry i dialogi: eksport FCS do __translations\base."
+                         Foreground="#B9AEC9" Margin="0,4,0,0" TextWrapping="Wrap"/>
+            </StackPanel>
+          </Border>
+
+          <StackPanel Grid.Row="2" Orientation="Horizontal" Margin="0,0,0,10">
+            <Button Name="btnScanKenshi" Content="Skanuj podstawę gry"/>
+            <Button Name="btnTranslateKenshi" Content="Tłumacz brakujące"/>
+            <Button Name="btnExportKenshiCsv" Content="Eksport CSV"/>
+            <Button Name="btnImportKenshiCsv" Content="Import CSV"/>
+            <Button Name="btnFcsHelpKenshi" Content="Jak wyeksportować dane z FCS?"/>
+            <Button Name="btnBuildKenshi" Content="Przygotuj pliki pl_PL"/>
+            <Label Name="lblKenshiCount" Content="Wpisy: 0" VerticalContentAlignment="Center" Margin="8,0,0,0"/>
+          </StackPanel>
+
+          <DataGrid Grid.Row="3" Name="kenshiGrid" AutoGenerateColumns="False" CanUserAddRows="False"
+                    SelectionMode="Single" EnableRowVirtualization="True" AlternationCount="2">
+            <DataGrid.Columns>
+              <DataGridTextColumn Header="Typ" Binding="{Binding Kind}" Width="100" IsReadOnly="True"/>
+              <DataGridTextColumn Header="Plik" Binding="{Binding File}" Width="230" IsReadOnly="True"/>
+              <DataGridTextColumn Header="Klucz / kontekst" Binding="{Binding Key}" Width="260" IsReadOnly="True"/>
+              <DataGridTemplateColumn Header="Angielski" Width="*">
+                <DataGridTemplateColumn.CellTemplate>
+                  <DataTemplate>
+                    <TextBox Text="{Binding Source}" IsReadOnly="True" IsReadOnlyCaretVisible="True"
+                             BorderThickness="0" Background="Transparent" Foreground="#ECE8F6"
+                             Padding="2,0" TextWrapping="NoWrap"/>
+                  </DataTemplate>
+                </DataGridTemplateColumn.CellTemplate>
+              </DataGridTemplateColumn>
+              <DataGridTextColumn Header="Polski" Binding="{Binding Translation, UpdateSourceTrigger=PropertyChanged}" Width="*"/>
+            </DataGrid.Columns>
+          </DataGrid>
+
+          <TextBlock Grid.Row="4" Name="txtKenshiStatus" Margin="0,10,0,0" TextWrapping="Wrap"
+                     Foreground="#B9AEC9"
+                     Text="Wykryj Kenshi lub wskaż folder instalacji. Profil obsługuje na razie tylko podstawową grę."/>
+        </Grid>
+      </TabItem>
+
       <TabItem Name="tabGameProfiles" Header="Profile gier">
         <Grid Margin="24" Background="{StaticResource Bg}">
           <StackPanel>
@@ -2137,6 +2635,13 @@ $null = $langWindow.ShowDialog()
               <StackPanel>
                 <TextBlock Text="RimWorld" FontSize="18" FontWeight="SemiBold" Foreground="#CDA8F2"/>
                 <TextBlock Text="Aktywny profil. Languages/English, DefInjected, Defs, Steam Workshop." Foreground="#B9AEC9" Margin="0,4,0,0"/>
+              </StackPanel>
+            </Border>
+            <Border Background="#211A2B" BorderBrush="#6D43A1" BorderThickness="1" CornerRadius="6" Padding="16" Margin="0,0,0,10">
+              <StackPanel>
+                <TextBlock Text="Kenshi" FontSize="18" FontWeight="SemiBold" Foreground="#CDA8F2"/>
+                <TextBlock Text="Profil podstawowej gry. UI gettext (.po/.mo) + eksport FCS gamedata/dialogue." Foreground="#B9AEC9" Margin="0,4,0,10"/>
+                <Button Name="btnOpenKenshiProfile" Content="Otwórz profil Kenshi" HorizontalAlignment="Left"/>
               </StackPanel>
             </Border>
             <Border Background="#19151F" BorderBrush="#33293E" BorderThickness="1" CornerRadius="6" Padding="16">
@@ -2159,7 +2664,7 @@ $window = [Windows.Markup.XamlReader]::Load($reader)
 $names = @(
     "btnChooseMod","btnAnalyze","btnExport","btnImport","btnAutoTranslate","btnValidate","btnBuild",
     "txtModPath","txtModName","txtPackageId","txtAuthor","grid","lblCount","txtStatus",
-    "btnDetect","txtSearch","lblMods","modsGrid","btnUseSelected","btnOpenFolder","btnOpenCurrentFolder","cmbSourceLang","cmbTargetLang","lblSourceLang","lblTargetLang","tabTranslation","tabInstalledMods","tabGameProfiles","chkPreviewFlag","cmbPreviewFlag","btnCopyWorkshop","lblCoverageTitle","txtCoveragePL","txtCoverageEN","btnLoadExistingPL","btnLoadExistingEN"
+    "btnDetect","txtSearch","lblMods","modsGrid","btnUseSelected","btnOpenFolder","btnOpenCurrentFolder","cmbSourceLang","cmbTargetLang","lblSourceLang","lblTargetLang","tabTranslation","tabInstalledMods","tabGameProfiles","chkPreviewFlag","cmbPreviewFlag","btnCopyWorkshop","lblCoverageTitle","txtCoveragePL","txtCoverageEN","btnLoadExistingPL","btnLoadExistingEN","tabKenshi","btnOpenKenshiProfile","btnDetectKenshi","btnChooseKenshi","txtKenshiPath","btnOpenKenshiFolder","btnScanKenshi","btnTranslateKenshi","btnExportKenshiCsv","btnImportKenshiCsv","btnFcsHelpKenshi","btnBuildKenshi","lblKenshiCount","kenshiGrid","txtKenshiStatus"
 )
 foreach ($n in $names) { Set-Variable -Name $n -Value $window.FindName($n) }
 
@@ -2212,6 +2717,7 @@ function Apply-UiLanguage {
         $tabTranslation.Header = "Tłumaczenie"
         $tabInstalledMods.Header = "Zainstalowane mody"
         $tabGameProfiles.Header = "Profile gier"
+        $tabKenshi.Header = "Kenshi"
         return
     }
 
@@ -2219,6 +2725,17 @@ function Apply-UiLanguage {
     $tabTranslation.Header = "Translation"
     $tabInstalledMods.Header = "Installed mods"
     $tabGameProfiles.Header = "Game profiles"
+    $tabKenshi.Header = "Kenshi"
+    $btnOpenKenshiProfile.Content = "Open Kenshi profile"
+    $btnDetectKenshi.Content = "Detect Kenshi"
+    $btnChooseKenshi.Content = "Choose Kenshi folder"
+    $btnOpenKenshiFolder.Content = "Open folder"
+    $btnScanKenshi.Content = "Scan base game"
+    $btnTranslateKenshi.Content = "Translate missing"
+    $btnExportKenshiCsv.Content = "Export CSV"
+    $btnImportKenshiCsv.Content = "Import CSV"
+    $btnFcsHelpKenshi.Content = "How to export data with FCS?"
+    $btnBuildKenshi.Content = "Prepare pl_PL files"
     $lblCoverageTitle.Text = "Existing languages:"
     $btnLoadExistingPL.Content = "Reload Polish"
     $btnLoadExistingEN.Content = "Reload English"
@@ -2320,7 +2837,7 @@ $grid.Add_PreviewKeyDown({
             if ($null -ne $grid.SelectedItem) {
                 $sourceText = [string]$grid.SelectedItem.Source
                 if (-not [string]::IsNullOrEmpty($sourceText)) {
-                    [System.Windows.Clipboard]::SetText($sourceText)
+                    [void](Set-ClipboardTextSafe $sourceText)
                     $txtStatus.Text = if ($script:UiLanguage -eq "en") {
                         "Source text copied to clipboard."
                     } else {
@@ -2331,6 +2848,149 @@ $grid.Add_PreviewKeyDown({
             }
         }
     } catch {}
+})
+
+
+$btnOpenKenshiProfile.Add_Click({
+    $window.Content.Children[1].SelectedItem = $tabKenshi
+    if ([string]::IsNullOrWhiteSpace($txtKenshiPath.Text)) {
+        $detected = Get-KenshiInstallPath
+        if ($detected) { $txtKenshiPath.Text = $detected }
+    }
+})
+
+$btnDetectKenshi.Add_Click({
+    $detected = Get-KenshiInstallPath
+    if ($detected) {
+        $txtKenshiPath.Text = $detected
+        $txtKenshiStatus.Text = "Wykryto Kenshi: $detected"
+    } else {
+        [System.Windows.MessageBox]::Show("Nie znaleziono instalacji Kenshi w bibliotekach Steam.","Mod Translation Toolkit") | Out-Null
+    }
+})
+
+$btnChooseKenshi.Add_Click({
+    $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dlg.Description = "Wybierz główny folder Kenshi"
+    if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+        $txtKenshiPath.Text = $dlg.SelectedPath
+    }
+})
+
+$btnOpenKenshiFolder.Add_Click({
+    if (Test-Path $txtKenshiPath.Text) {
+        Start-Process explorer.exe -ArgumentList "`"$($txtKenshiPath.Text)`""
+    }
+})
+
+$btnScanKenshi.Add_Click({
+    try {
+        $scan = Scan-KenshiBase $txtKenshiPath.Text
+        $parts = New-Object System.Collections.ArrayList
+        [void]$parts.Add("Wpisy: $($scan.Total)")
+        [void]$parts.Add("istniejące PL: $($scan.ExistingLoaded)")
+        if ($scan.UiFound) { [void]$parts.Add("UI gettext: OK") }
+        else { [void]$parts.Add("UI gettext: nie znaleziono main.po") }
+
+        if ($scan.FcsExportFound) { [void]$parts.Add("eksport FCS: OK") }
+        else { [void]$parts.Add("eksport FCS: BRAK — możesz już tłumaczyć UI; dane świata/dialogi pojawią się po eksporcie z FCS") }
+
+        if ($scan.SkippedPlural -gt 0) { [void]$parts.Add("pominięte formy mnogie: $($scan.SkippedPlural)") }
+        $txtKenshiStatus.Text = @($parts) -join " | "
+    } catch {
+        [System.Windows.MessageBox]::Show($_.Exception.Message,"Błąd") | Out-Null
+    }
+})
+
+$btnTranslateKenshi.Add_Click({
+    if ($script:KenshiEntries.Count -eq 0) {
+        [System.Windows.MessageBox]::Show("Najpierw zeskanuj podstawę Kenshi.","Mod Translation Toolkit") | Out-Null
+        return
+    }
+
+    $missing = @($script:KenshiEntries | Where-Object { [string]::IsNullOrWhiteSpace($_.Translation) })
+    $done = 0
+    foreach ($e in $missing) {
+        try {
+            $e.Translation = Translate-Google ([string]$e.Source) "en" "pl"
+            $done++
+            if (($done % 20) -eq 0) {
+                Refresh-KenshiGrid
+                [System.Windows.Forms.Application]::DoEvents()
+            }
+        } catch {}
+    }
+    Refresh-KenshiGrid
+    $txtKenshiStatus.Text = "Uzupełniono automatycznie: $done / $($missing.Count)."
+})
+
+$btnExportKenshiCsv.Add_Click({
+    if ($script:KenshiEntries.Count -eq 0) { return }
+    $dlg = New-Object Microsoft.Win32.SaveFileDialog
+    $dlg.Filter = "CSV (*.csv)|*.csv"
+    $dlg.FileName = "Kenshi-pl_PL.csv"
+    if ($dlg.ShowDialog()) {
+        Export-KenshiCsv $dlg.FileName
+        $txtKenshiStatus.Text = "Wyeksportowano CSV: $($dlg.FileName)"
+    }
+})
+
+$btnImportKenshiCsv.Add_Click({
+    $dlg = New-Object Microsoft.Win32.OpenFileDialog
+    $dlg.Filter = "CSV (*.csv)|*.csv"
+    if ($dlg.ShowDialog()) {
+        try {
+            $loaded = Import-KenshiCsv $dlg.FileName
+            $txtKenshiStatus.Text = "Wczytano z CSV: $loaded wpisów."
+        } catch {
+            [System.Windows.MessageBox]::Show($_.Exception.Message,"Błąd") | Out-Null
+        }
+    }
+})
+
+
+$btnFcsHelpKenshi.Add_Click({
+    $msg = @"
+Aby wyeksportować dane podstawowej gry Kenshi do tłumaczenia:
+
+1. Uruchom Forgotten Construction Set (FCS) z folderu Kenshi.
+2. Przy starcie FCS załaduj tylko podstawową grę, bez modów.
+3. Otwórz narzędzia tłumaczeń / Translations.
+4. Wykonaj Export dla języka bazowego.
+5. FCS powinien utworzyć:
+   __translations\base\gamedata.pot
+   __translations\base\dialogue\*.pot
+6. Wróć do Toolkita i kliknij „Skanuj podstawę gry”.
+
+Sam interfejs z locale\en\LC_MESSAGES\main.pot/main.po można tłumaczyć bez eksportu FCS.
+"@
+    [System.Windows.MessageBox]::Show($msg, "Kenshi — eksport danych przez FCS") | Out-Null
+})
+
+$btnBuildKenshi.Add_Click({
+    if ($script:KenshiEntries.Count -eq 0) {
+        [System.Windows.MessageBox]::Show("Najpierw zeskanuj podstawę Kenshi.","Mod Translation Toolkit") | Out-Null
+        return
+    }
+
+    $answer = [System.Windows.MessageBox]::Show(
+        "Toolkit zapisze pliki pl_PL bezpośrednio w folderze Kenshi.`n`nIstniejące main.po/main.mo/gamedata.po/dialogue zostaną wcześniej skopiowane do plików backup.`n`nKontynuować?",
+        "Kenshi — przygotowanie tłumaczenia",
+        [System.Windows.MessageBoxButton]::YesNo,
+        [System.Windows.MessageBoxImage]::Question
+    )
+    if ($answer -ne [System.Windows.MessageBoxResult]::Yes) { return }
+
+    try {
+        $out = Build-KenshiBaseTranslation $txtKenshiPath.Text
+        $txtKenshiStatus.Text = "Przygotowano pliki pl_PL. Dane gry/dialogi wymagają teraz Build w FCS. Folder: $out"
+        [System.Windows.MessageBox]::Show(
+            "Gotowe.`n`nUI main.po/main.mo zostały przygotowane.`nPliki gamedata/dialogue zapisano do __translations\pl_PL.`n`nDla danych gry uruchom FCS -> Translations -> pl_PL -> Build.",
+            "Mod Translation Toolkit"
+        ) | Out-Null
+    } catch {
+        [System.Windows.MessageBox]::Show($_.Exception.Message,"Błąd") | Out-Null
+    }
 })
 
 $btnLoadExistingPL.Add_Click({
@@ -2499,14 +3159,14 @@ $btnCopyWorkshop.Add_Click({
     if ($script:LastWorkshopDescriptionPath -and (Test-Path $script:LastWorkshopDescriptionPath)) {
         try {
             $content = Get-Content -LiteralPath $script:LastWorkshopDescriptionPath -Raw -Encoding UTF8
-            [System.Windows.Clipboard]::SetText($content)
+            [void](Set-ClipboardTextSafe $content)
             $txtStatus.Text = if ($script:UiLanguage -eq "en") {
                 "Steam Workshop description copied to clipboard."
             } else {
                 "Opis Steam Workshop skopiowany do schowka."
             }
         } catch {
-            [System.Windows.MessageBox]::Show($_.Exception.Message, "Clipboard")
+            [System.Windows.MessageBox]::Show("Nie udało się uzyskać dostępu do schowka po kilku próbach. Spróbuj ponownie za chwilę.`n`n$($_.Exception.Message)", "Schowek")
         }
     }
 })
