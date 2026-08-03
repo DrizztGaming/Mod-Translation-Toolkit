@@ -7,7 +7,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-$AppVersion = "0.5.5"
+$AppVersion = "0.7.8"
 $script:UiLanguage = "pl"
 $script:Entries = New-Object System.Collections.ArrayList
 $script:Mods = New-Object System.Collections.ArrayList
@@ -73,9 +73,535 @@ function Get-Placeholders([string]$text) {
     return @($tokens | Sort-Object)
 }
 
-function Translate-Google([string]$text, [string]$sourceLang="en", [string]$targetLang="pl") {
-    if ([string]::IsNullOrWhiteSpace($text)) { return $text }
 
+function Get-ToolkitSettingsDirectory {
+    $dir = Join-Path $env:APPDATA "ModTranslationToolkit"
+    if (-not (Test-Path -LiteralPath $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+    return $dir
+}
+
+
+function Get-TranslationProviderSettingsPath {
+    return (Join-Path (Get-ToolkitSettingsDirectory) "translation-provider.dat")
+}
+
+function Protect-ToolkitSecret([string]$plainText) {
+    if ([string]::IsNullOrWhiteSpace($plainText)) { return "" }
+    $plainBytes = [System.Text.Encoding]::UTF8.GetBytes($plainText)
+    $protectedBytes = [System.Security.Cryptography.ProtectedData]::Protect(
+        $plainBytes,
+        $null,
+        [System.Security.Cryptography.DataProtectionScope]::CurrentUser
+    )
+    return [Convert]::ToBase64String($protectedBytes)
+}
+
+function Unprotect-ToolkitSecret([string]$protectedText) {
+    if ([string]::IsNullOrWhiteSpace($protectedText)) { return "" }
+    try {
+        $protectedBytes = [Convert]::FromBase64String($protectedText)
+        $plainBytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
+            $protectedBytes,
+            $null,
+            [System.Security.Cryptography.DataProtectionScope]::CurrentUser
+        )
+        return [System.Text.Encoding]::UTF8.GetString($plainBytes)
+    } catch { return "" }
+}
+
+function Get-DefaultTranslationProviderSettings {
+    return [pscustomobject]@{
+        Provider = "Google"
+        GoogleKey = ""
+        DeepLKey = ""
+        DeepLPlan = "Free"
+        LibreEndpoint = "http://localhost:5000"
+        LibreKey = ""
+    }
+}
+
+function Get-TranslationProviderSettings {
+    $defaults = Get-DefaultTranslationProviderSettings
+    $path = Get-TranslationProviderSettingsPath
+
+    # Migration from v0.5.7 Google-only encrypted key.
+    $legacyPath = Join-Path (Get-ToolkitSettingsDirectory) "google-translate-api.dat"
+    if (-not (Test-Path -LiteralPath $path) -and (Test-Path -LiteralPath $legacyPath)) {
+        try {
+            $protectedBytes = [System.IO.File]::ReadAllBytes($legacyPath)
+            $plainBytes = [System.Security.Cryptography.ProtectedData]::Unprotect(
+                $protectedBytes,
+                $null,
+                [System.Security.Cryptography.DataProtectionScope]::CurrentUser
+            )
+            $defaults.GoogleKey = [System.Text.Encoding]::UTF8.GetString($plainBytes)
+            Save-TranslationProviderSettings $defaults
+        } catch {}
+    }
+
+    if (-not (Test-Path -LiteralPath $path)) { return $defaults }
+
+    try {
+        $raw = Get-Content -LiteralPath $path -Raw -Encoding UTF8 | ConvertFrom-Json
+        $s = Get-DefaultTranslationProviderSettings
+
+        if ($raw.Provider) { $s.Provider = [string]$raw.Provider }
+        if ($raw.GoogleKey) { $s.GoogleKey = Unprotect-ToolkitSecret ([string]$raw.GoogleKey) }
+        if ($raw.DeepLKey) { $s.DeepLKey = Unprotect-ToolkitSecret ([string]$raw.DeepLKey) }
+        if ($raw.DeepLPlan) { $s.DeepLPlan = [string]$raw.DeepLPlan }
+        if ($raw.LibreEndpoint) { $s.LibreEndpoint = [string]$raw.LibreEndpoint }
+        if ($raw.LibreKey) { $s.LibreKey = Unprotect-ToolkitSecret ([string]$raw.LibreKey) }
+
+        return $s
+    } catch {
+        return $defaults
+    }
+}
+
+function Save-TranslationProviderSettings($settings) {
+    $path = Get-TranslationProviderSettingsPath
+    $obj = [ordered]@{
+        Provider = [string]$settings.Provider
+        GoogleKey = Protect-ToolkitSecret ([string]$settings.GoogleKey)
+        DeepLKey = Protect-ToolkitSecret ([string]$settings.DeepLKey)
+        DeepLPlan = [string]$settings.DeepLPlan
+        LibreEndpoint = [string]$settings.LibreEndpoint
+        LibreKey = Protect-ToolkitSecret ([string]$settings.LibreKey)
+    }
+    [System.IO.File]::WriteAllText(
+        $path,
+        ($obj | ConvertTo-Json),
+        (New-Object System.Text.UTF8Encoding($false))
+    )
+}
+
+
+$script:TranslationProviderLanguageCache = @{}
+
+function Clear-TranslationProviderLanguageCache {
+    $script:TranslationProviderLanguageCache = @{}
+}
+
+function Get-ActiveTranslationProvider {
+    return (Get-TranslationProviderSettings).Provider
+}
+
+function Show-TranslationApiHelp([string]$provider) {
+    $isEn = ($script:UiLanguage -eq "en")
+
+    switch ($provider) {
+        "Google" {
+            $msg = if ($isEn) {
+@" 
+Google Cloud Translation:
+
+1. Open https://console.cloud.google.com/
+2. Create/select a project.
+3. Enable Cloud Translation API.
+4. Configure billing if required by Google.
+5. Open APIs & Services > Credentials.
+6. Create an API key.
+7. Restrict the key to Cloud Translation API.
+8. Paste it into Toolkit API Settings.
+
+Google Cloud costs and quotas belong to the key owner.
+"@
+            } else {
+@"
+Google Cloud Translation:
+
+1. Otwórz https://console.cloud.google.com/
+2. Utwórz lub wybierz projekt.
+3. Włącz Cloud Translation API.
+4. Skonfiguruj rozliczenia, jeśli Google tego wymaga.
+5. Wejdź w APIs & Services > Credentials.
+6. Utwórz API key.
+7. Ogranicz klucz do Cloud Translation API.
+8. Wklej go w Ustawieniach API Toolkita.
+
+Koszty i limity Google Cloud należą do właściciela klucza.
+"@
+            }
+        }
+        "DeepL" {
+            $msg = if ($isEn) {
+@"
+DeepL API:
+
+1. Open https://www.deepl.com/pro-api
+2. Create a DeepL API account.
+3. Choose API Free or API Pro.
+4. Copy the authentication key from your DeepL account.
+5. Paste it into Toolkit API Settings and select the matching plan.
+
+Note: DeepL API Free may still request payment details for abuse prevention.
+"@
+            } else {
+@"
+DeepL API:
+
+1. Otwórz https://www.deepl.com/pro-api
+2. Utwórz konto DeepL API.
+3. Wybierz API Free albo API Pro.
+4. Skopiuj klucz uwierzytelniający z konta DeepL.
+5. Wklej go w Ustawieniach API Toolkita i wybierz odpowiedni plan.
+
+Uwaga: DeepL API Free może nadal wymagać danych płatniczych w celu zapobiegania nadużyciom.
+"@
+            }
+        }
+        default {
+            $msg = if ($isEn) {
+@"
+LibreTranslate:
+
+Option A — self-hosted, no API key required:
+1. Install LibreTranslate locally.
+2. Start it, commonly at http://localhost:5000
+3. Enter that address as the Endpoint.
+4. Leave API key empty unless your server requires one.
+
+Option B — managed libretranslate.com:
+1. Get an API key from https://portal.libretranslate.com/
+2. Set Endpoint to https://libretranslate.com
+3. Paste the API key.
+
+A self-hosted LibreTranslate instance can work without billing or a card.
+"@
+            } else {
+@"
+LibreTranslate:
+
+Opcja A — własny serwer, bez wymaganego klucza:
+1. Zainstaluj LibreTranslate lokalnie.
+2. Uruchom je, zwykle pod http://localhost:5000
+3. Wpisz ten adres jako Endpoint.
+4. Klucz API zostaw pusty, chyba że Twój serwer go wymaga.
+
+Opcja B — zarządzane libretranslate.com:
+1. Zdobądź klucz na https://portal.libretranslate.com/
+2. Ustaw Endpoint na https://libretranslate.com
+3. Wklej klucz API.
+
+Własny LibreTranslate może działać bez billingu i bez karty.
+"@
+            }
+        }
+    }
+
+    [System.Windows.MessageBox]::Show($msg, "Translation API") | Out-Null
+}
+
+function Show-TranslationApiSettingsWindow {
+    $settings = Get-TranslationProviderSettings
+
+    [xml]$apiXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="Translation API Settings"
+        Width="660" Height="510"
+        WindowStartupLocation="CenterOwner"
+        ResizeMode="NoResize"
+        Background="#121018"
+        Foreground="#ECE8F6">
+  <Grid Margin="18">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+
+    <TextBlock Name="txtApiTitle" Grid.Row="0" Text="Automatyczne tłumaczenie"
+               FontSize="20" FontWeight="Bold" Foreground="#D4B5F5" Margin="0,0,0,10"/>
+
+    <StackPanel Grid.Row="1" Margin="0,0,0,12">
+      <TextBlock Name="lblProvider" Text="Dostawca:" Margin="0,0,0,4"/>
+      <ComboBox Name="cmbProvider" Height="32">
+        <ComboBoxItem Content="Google Cloud Translation" Tag="Google"/>
+        <ComboBoxItem Content="DeepL API" Tag="DeepL"/>
+        <ComboBoxItem Content="LibreTranslate" Tag="LibreTranslate"/>
+      </ComboBox>
+    </StackPanel>
+
+    <Border Grid.Row="2" Name="panelGoogle" Background="#1B1723" BorderBrush="#40344F" BorderThickness="1" Padding="12" Margin="0,0,0,10">
+      <StackPanel>
+        <TextBlock Text="Google Cloud Translation" FontWeight="Bold" Foreground="#CDA8F2" Margin="0,0,0,8"/>
+        <TextBlock Name="lblGoogleKey" Text="API key:"/>
+        <PasswordBox Name="txtGoogleKey" Height="30" Background="#241D30" Foreground="#ECE8F6" BorderBrush="#40344F" Padding="5"/>
+      </StackPanel>
+    </Border>
+
+    <Border Grid.Row="2" Name="panelDeepL" Background="#1B1723" BorderBrush="#40344F" BorderThickness="1" Padding="12" Margin="0,0,0,10" Visibility="Collapsed">
+      <StackPanel>
+        <TextBlock Text="DeepL API" FontWeight="Bold" Foreground="#CDA8F2" Margin="0,0,0,8"/>
+        <TextBlock Text="Authentication key:"/>
+        <PasswordBox Name="txtDeepLKey" Height="30" Background="#241D30" Foreground="#ECE8F6" BorderBrush="#40344F" Padding="5" Margin="0,0,0,8"/>
+        <TextBlock Name="lblDeepLPlan" Text="Plan:"/>
+        <ComboBox Name="cmbDeepLPlan" Height="30">
+          <ComboBoxItem Content="API Free" Tag="Free"/>
+          <ComboBoxItem Content="API Pro" Tag="Pro"/>
+        </ComboBox>
+      </StackPanel>
+    </Border>
+
+    <Border Grid.Row="2" Name="panelLibre" Background="#1B1723" BorderBrush="#40344F" BorderThickness="1" Padding="12" Margin="0,0,0,10" Visibility="Collapsed">
+      <StackPanel>
+        <TextBlock Text="LibreTranslate" FontWeight="Bold" Foreground="#CDA8F2" Margin="0,0,0,8"/>
+        <TextBlock Name="lblLibreEndpoint" Text="Endpoint:"/>
+        <TextBox Name="txtLibreEndpoint" Height="30" Background="#241D30" Foreground="#ECE8F6" BorderBrush="#40344F" Padding="5" Margin="0,0,0,8"/>
+        <TextBlock Name="lblLibreKey" Text="API key (opcjonalny dla self-hosted):"/>
+        <PasswordBox Name="txtLibreKey" Height="30" Background="#241D30" Foreground="#ECE8F6" BorderBrush="#40344F" Padding="5"/>
+      </StackPanel>
+    </Border>
+
+    <TextBlock Name="txtApiInfo" Grid.Row="3" Foreground="#B9AEC9" TextWrapping="Wrap"
+               Text="Klucze są przechowywane lokalnie i szyfrowane przez Windows DPAPI dla bieżącego użytkownika."/>
+
+    <TextBlock Name="txtApiWarning" Grid.Row="4" Foreground="#B9AEC9" TextWrapping="Wrap" Margin="0,10,0,0"
+               Text="Google i DeepL mogą wymagać konta rozliczeniowego. Obsługa języków jest sprawdzana przed tłumaczeniem; dla LibreTranslate według możliwości konkretnego serwera."/>
+
+    <StackPanel Grid.Row="5" Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,16,0,0">
+      <Button Name="btnApiHelp" Content="Instrukcja" Background="#7A3FC2" Foreground="White" BorderBrush="#9D64E8" Padding="12,7" Margin="0,0,8,0"/>
+      <Button Name="btnApiTest" Content="Sprawdź języki" Background="#4A385D" Foreground="White" BorderBrush="#6D587D" Padding="12,7" Margin="0,0,8,0"/>
+      <Button Name="btnApiSave" Content="Zapisz" Background="#7A3FC2" Foreground="White" BorderBrush="#9D64E8" Padding="12,7" Margin="0,0,8,0"/>
+      <Button Name="btnApiCancel" Content="Anuluj" Background="#4A385D" Foreground="White" BorderBrush="#6D587D" Padding="12,7"/>
+    </StackPanel>
+  </Grid>
+</Window>
+'@
+
+    $reader = New-Object System.Xml.XmlNodeReader $apiXaml
+    $dlg = [Windows.Markup.XamlReader]::Load($reader)
+    $dlg.Owner = $window
+
+    foreach ($n in @("txtApiTitle","lblProvider","cmbProvider","panelGoogle","txtGoogleKey","panelDeepL","txtDeepLKey","cmbDeepLPlan","panelLibre","txtLibreEndpoint","txtLibreKey","txtApiInfo","txtApiWarning","btnApiHelp","btnApiTest","btnApiSave","btnApiCancel","lblLibreKey")) {
+        Set-Variable -Name $n -Value $dlg.FindName($n) -Scope Local
+    }
+
+    $txtGoogleKey.Password = [string]$settings.GoogleKey
+    $txtDeepLKey.Password = [string]$settings.DeepLKey
+    $txtLibreEndpoint.Text = [string]$settings.LibreEndpoint
+    $txtLibreKey.Password = [string]$settings.LibreKey
+
+    foreach ($i in $cmbProvider.Items) {
+        if ([string]$i.Tag -eq [string]$settings.Provider) { $cmbProvider.SelectedItem = $i; break }
+    }
+    if ($null -eq $cmbProvider.SelectedItem) { $cmbProvider.SelectedIndex = 0 }
+
+    foreach ($i in $cmbDeepLPlan.Items) {
+        if ([string]$i.Tag -eq [string]$settings.DeepLPlan) { $cmbDeepLPlan.SelectedItem = $i; break }
+    }
+    if ($null -eq $cmbDeepLPlan.SelectedItem) { $cmbDeepLPlan.SelectedIndex = 0 }
+
+    if ($script:UiLanguage -eq "en") {
+        $txtApiTitle.Text = "Automatic translation"
+        $lblProvider.Text = "Provider:"
+        $txtApiInfo.Text = "Keys are stored locally and encrypted with Windows DPAPI for the current user."
+        $txtApiWarning.Text = "Google and DeepL may require billing/payment details. Language support is checked before translation; LibreTranslate is validated against the selected server."
+        $lblLibreKey.Text = "API key (optional for self-hosted):"
+        $btnApiHelp.Content = "Instructions"
+        $btnApiTest.Content = "Check languages"
+        $btnApiSave.Content = "Save"
+        $btnApiCancel.Content = "Cancel"
+    }
+
+    $refreshPanels = {
+        $provider = [string]$cmbProvider.SelectedItem.Tag
+        $panelGoogle.Visibility = if ($provider -eq "Google") { "Visible" } else { "Collapsed" }
+        $panelDeepL.Visibility = if ($provider -eq "DeepL") { "Visible" } else { "Collapsed" }
+        $panelLibre.Visibility = if ($provider -eq "LibreTranslate") { "Visible" } else { "Collapsed" }
+    }
+    $cmbProvider.Add_SelectionChanged($refreshPanels)
+    & $refreshPanels
+
+    $btnApiHelp.Add_Click({
+        Show-TranslationApiHelp ([string]$cmbProvider.SelectedItem.Tag)
+    })
+
+    $btnApiTest.Add_Click({
+        $temp = Get-DefaultTranslationProviderSettings
+        $temp.Provider = [string]$cmbProvider.SelectedItem.Tag
+        $temp.GoogleKey = [string]$txtGoogleKey.Password
+        $temp.DeepLKey = [string]$txtDeepLKey.Password
+        $temp.DeepLPlan = [string]$cmbDeepLPlan.SelectedItem.Tag
+        $temp.LibreEndpoint = ([string]$txtLibreEndpoint.Text).Trim().TrimEnd('/')
+        $temp.LibreKey = [string]$txtLibreKey.Password
+
+        $oldCaption = [string]$btnApiTest.Content
+        $btnApiTest.IsEnabled = $false
+        $btnApiTest.Content = if ($script:UiLanguage -eq "en") { "Checking..." } else { "Sprawdzanie..." }
+        $txtApiWarning.Text = if ($script:UiLanguage -eq "en") {
+            "Checking provider language capabilities..."
+        } else {
+            "Sprawdzanie języków obsługiwanych przez dostawcę..."
+        }
+        [System.Windows.Forms.Application]::DoEvents()
+
+        Clear-TranslationProviderLanguageCache
+
+        try {
+            $sourceCodes = @()
+            $targetCodes = @()
+
+            switch ($temp.Provider) {
+                "Google" {
+                    if ([string]::IsNullOrWhiteSpace($temp.GoogleKey)) {
+                        throw $(if ($script:UiLanguage -eq "en") { "Enter a Google Cloud API key first." } else { "Najpierw wpisz klucz Google Cloud API." })
+                    }
+
+                    # One lightweight official API request, not one request per language pair.
+                    $headers = @{ "X-goog-api-key" = [string]$temp.GoogleKey }
+                    $resp = Invoke-RestMethod `
+                        -Uri "https://translation.googleapis.com/language/translate/v2/languages?target=en" `
+                        -Method Get -Headers $headers -TimeoutSec 8
+                    $sourceCodes = @($resp.data.languages | ForEach-Object { [string]$_.language })
+                    $targetCodes = @($sourceCodes)
+                }
+
+                "DeepL" {
+                    if ([string]::IsNullOrWhiteSpace($temp.DeepLKey)) {
+                        throw $(if ($script:UiLanguage -eq "en") { "Enter a DeepL API key first." } else { "Najpierw wpisz klucz DeepL API." })
+                    }
+
+                    # Exactly two requests: current source list and current target list.
+                    $sourceCodes = @(Get-DeepLSupportedLanguages "Source" $temp)
+                    $targetCodes = @(Get-DeepLSupportedLanguages "Target" $temp)
+                }
+
+                "LibreTranslate" {
+                    if ([string]::IsNullOrWhiteSpace($temp.LibreEndpoint)) {
+                        throw $(if ($script:UiLanguage -eq "en") { "Enter a LibreTranslate endpoint first." } else { "Najpierw wpisz endpoint LibreTranslate." })
+                    }
+
+                    # Exactly one /languages request. Pair support is read from its targets arrays.
+                    $languageData = @(Get-LibreTranslateLanguageData $temp)
+                    $sourceCodes = @($languageData | ForEach-Object { [string]$_.code } | Where-Object { $_ })
+                    $targetCodes = @(
+                        $languageData | ForEach-Object { @($_.targets) } | ForEach-Object { [string]$_ } | Where-Object { $_ } | Sort-Object -Unique
+                    )
+                    if ($targetCodes.Count -eq 0) { $targetCodes = @($sourceCodes) }
+                }
+
+                default { throw "Unknown translation provider: $($temp.Provider)" }
+            }
+
+            $registeredSource = 0
+            $registeredTarget = 0
+            foreach ($lang in $script:Languages) {
+                $src = Get-ProviderLanguageCode $temp.Provider $lang.Code "Source"
+                $dst = Get-ProviderLanguageCode $temp.Provider $lang.Code "Target"
+
+                if (-not [string]::IsNullOrWhiteSpace($src)) {
+                    $baseSrc = $src.ToUpperInvariant().Split('-')[0]
+                    if (@($sourceCodes | Where-Object {
+                        $c = ([string]$_).ToUpperInvariant()
+                        $c -eq $src.ToUpperInvariant() -or $c.Split('-')[0] -eq $baseSrc
+                    }).Count -gt 0) { $registeredSource++ }
+                }
+
+                if (-not [string]::IsNullOrWhiteSpace($dst)) {
+                    $baseDst = $dst.ToUpperInvariant().Split('-')[0]
+                    if (@($targetCodes | Where-Object {
+                        $c = ([string]$_).ToUpperInvariant()
+                        $c -eq $dst.ToUpperInvariant() -or $c.Split('-')[0] -eq $baseDst
+                    }).Count -gt 0) { $registeredTarget++ }
+                }
+            }
+
+            $msg = if ($script:UiLanguage -eq "en") {
+                "Provider: $($temp.Provider)`nAvailable source languages: $($sourceCodes.Count)`nAvailable target languages: $($targetCodes.Count)`nToolkit registry matches: $registeredSource source / $registeredTarget target."
+            } else {
+                "Dostawca: $($temp.Provider)`nDostępne języki źródłowe: $($sourceCodes.Count)`nDostępne języki docelowe: $($targetCodes.Count)`nDopasowania rejestru Toolkita: $registeredSource źródłowych / $registeredTarget docelowych."
+            }
+
+            [System.Windows.MessageBox]::Show($msg, "Translation API") | Out-Null
+        } catch {
+            $msg = if ($script:UiLanguage -eq "en") {
+                "Language check failed.`n`n$($_.Exception.Message)"
+            } else {
+                "Sprawdzanie języków nie powiodło się.`n`n$($_.Exception.Message)"
+            }
+            [System.Windows.MessageBox]::Show($msg, "Translation API") | Out-Null
+        } finally {
+            $btnApiTest.Content = $oldCaption
+            $btnApiTest.IsEnabled = $true
+            $txtApiWarning.Text = if ($script:UiLanguage -eq "en") {
+                "Google and DeepL may require billing/payment details. Language support is checked before translation; LibreTranslate is validated against the selected server."
+            } else {
+                "Google i DeepL mogą wymagać konta rozliczeniowego. Obsługa języków jest sprawdzana przed tłumaczeniem; dla LibreTranslate według możliwości konkretnego serwera."
+            }
+        }
+    })
+
+    $btnApiSave.Add_Click({
+        $provider = [string]$cmbProvider.SelectedItem.Tag
+        $new = Get-DefaultTranslationProviderSettings
+        $new.Provider = $provider
+        $new.GoogleKey = [string]$txtGoogleKey.Password
+        $new.DeepLKey = [string]$txtDeepLKey.Password
+        $new.DeepLPlan = [string]$cmbDeepLPlan.SelectedItem.Tag
+        $new.LibreEndpoint = ([string]$txtLibreEndpoint.Text).Trim().TrimEnd('/')
+        $new.LibreKey = [string]$txtLibreKey.Password
+
+        if ($provider -eq "Google" -and [string]::IsNullOrWhiteSpace($new.GoogleKey)) {
+            [System.Windows.MessageBox]::Show("Google Cloud wymaga klucza API.","Translation API") | Out-Null
+            return
+        }
+        if ($provider -eq "DeepL" -and [string]::IsNullOrWhiteSpace($new.DeepLKey)) {
+            [System.Windows.MessageBox]::Show("DeepL wymaga klucza API.","Translation API") | Out-Null
+            return
+        }
+        if ($provider -eq "LibreTranslate" -and [string]::IsNullOrWhiteSpace($new.LibreEndpoint)) {
+            [System.Windows.MessageBox]::Show("Podaj endpoint LibreTranslate.","Translation API") | Out-Null
+            return
+        }
+
+        Save-TranslationProviderSettings $new
+        Clear-TranslationProviderLanguageCache
+        $dlg.DialogResult = $true
+        $dlg.Close()
+    })
+
+    $btnApiCancel.Add_Click({
+        $dlg.DialogResult = $false
+        $dlg.Close()
+    })
+
+    [void]$dlg.ShowDialog()
+}
+
+function Test-TranslationProviderConfigured {
+    $s = Get-TranslationProviderSettings
+    switch ($s.Provider) {
+        "Google" { return -not [string]::IsNullOrWhiteSpace($s.GoogleKey) }
+        "DeepL" { return -not [string]::IsNullOrWhiteSpace($s.DeepLKey) }
+        "LibreTranslate" { return -not [string]::IsNullOrWhiteSpace($s.LibreEndpoint) }
+        default { return $false }
+    }
+}
+
+function Require-TranslationProvider {
+    if (Test-TranslationProviderConfigured) { return $true }
+
+    $msg = if ($script:UiLanguage -eq "en") {
+        "Automatic translation is not configured.`n`nOpen Translation API Settings now?"
+    } else {
+        "Automatyczne tłumaczenie nie jest skonfigurowane.`n`nOtworzyć teraz Ustawienia API?"
+    }
+
+    $ans = [System.Windows.MessageBox]::Show($msg,"Translation API",[System.Windows.MessageBoxButton]::YesNo)
+    if ($ans -eq [System.Windows.MessageBoxResult]::Yes) {
+        Show-TranslationApiSettingsWindow
+    }
+    return (Test-TranslationProviderConfigured)
+}
+
+function Protect-TranslationPlaceholders([string]$text, [ref]$mapRef) {
     $map = @{}
     $counter = 0
     $protected = $text
@@ -84,26 +610,610 @@ function Translate-Google([string]$text, [string]$sourceLang="en", [string]$targ
     foreach ($pattern in $patterns) {
         $matches = [regex]::Matches($protected, $pattern)
         foreach ($m in @($matches | Sort-Object Index -Descending)) {
-            $key = "__RWPH$counter`__"
+            $key = "__MTTPH$counter`__"
             $map[$key] = $m.Value
             $protected = $protected.Remove($m.Index, $m.Length).Insert($m.Index, $key)
             $counter++
         }
     }
+    $mapRef.Value = $map
+    return $protected
+}
 
-    $escaped = [uri]::EscapeDataString($protected)
-    $url = "https://translate.googleapis.com/translate_a/single?client=gtx&sl=$sourceLang&tl=$targetLang&dt=t&q=$escaped"
-    $resp = Invoke-RestMethod -Uri $url -Method Get -TimeoutSec 25
+function Restore-TranslationPlaceholders([string]$text, $map) {
+    $result = $text
+    foreach ($k in $map.Keys) { $result = $result.Replace($k, $map[$k]) }
+    return $result
+}
 
-    $translated = ""
-    foreach ($part in $resp[0]) {
-        if ($part[0]) { $translated += [string]$part[0] }
+function Translate-GoogleCloud([string]$text,[string]$sourceLang,[string]$targetLang,$settings) {
+    $map = $null
+    $protected = Protect-TranslationPlaceholders $text ([ref]$map)
+
+    $body = @{
+        q = $protected
+        source = $sourceLang
+        target = $targetLang
+        format = "text"
+    } | ConvertTo-Json -Compress
+
+    $headers = @{ "X-goog-api-key" = [string]$settings.GoogleKey }
+    $resp = Invoke-RestMethod -Uri "https://translation.googleapis.com/language/translate/v2" `
+        -Method Post -Headers $headers -ContentType "application/json; charset=utf-8" -Body $body -TimeoutSec 30
+
+    $translated = [System.Net.WebUtility]::HtmlDecode([string]$resp.data.translations[0].translatedText)
+    return (Restore-TranslationPlaceholders $translated $map)
+}
+
+function Translate-DeepL([string]$text,[string]$sourceLang,[string]$targetLang,$settings) {
+    $map = $null
+    $protected = Protect-TranslationPlaceholders $text ([ref]$map)
+
+    $base = Get-DeepLApiBase $settings
+    $headers = @{ "Authorization" = "DeepL-Auth-Key $($settings.DeepLKey)" }
+
+    $body = @{
+        text = $protected
+        source_lang = $sourceLang.ToUpperInvariant()
+        target_lang = $targetLang.ToUpperInvariant()
     }
 
-    foreach ($k in $map.Keys) {
-        $translated = $translated.Replace($k, $map[$k])
+    $resp = Invoke-RestMethod -Uri "$base/v2/translate" -Method Post -Headers $headers `
+        -ContentType "application/x-www-form-urlencoded" -Body $body -TimeoutSec 30
+
+    $translated = [string]$resp.translations[0].text
+    return (Restore-TranslationPlaceholders $translated $map)
+}
+
+
+function Get-MojibakeSuspicionScore([string]$value) {
+    if ([string]::IsNullOrEmpty($value)) { return 0 }
+
+    $score = 0
+
+    # Keep this function source ASCII-only. These Unicode code points are the
+    # common leading characters produced when UTF-8 bytes are decoded as CP1252.
+    $suspectChars = @(
+        [char]0x00C3, # Ã
+        [char]0x00C2, # Â
+        [char]0x00C4, # Ä
+        [char]0x00C5, # Å
+        [char]0x00C6, # Æ
+        [char]0x00D0, # Ð
+        [char]0x00D1  # Ñ
+    )
+
+    foreach ($ch in $suspectChars) {
+        foreach ($c in $value.ToCharArray()) {
+            if ($c -eq $ch) { $score++ }
+        }
     }
-    return $translated
+
+    # Extra markers for common smart-quote / emoji mojibake prefixes.
+    if ($value.Contains(([char]0x00E2).ToString())) { $score++ } # â
+    if ($value.Contains(([char]0x00EF).ToString())) { $score++ } # ï
+    if ($value.Contains(([char]0x00F0).ToString())) { $score++ } # ð
+
+    return $score
+}
+
+function Repair-TranslationMojibake([string]$value) {
+    if ([string]::IsNullOrWhiteSpace($value)) { return $value }
+
+    $before = Get-MojibakeSuspicionScore $value
+    if ($before -le 0) { return $value }
+
+    try {
+        $cp1252 = [System.Text.Encoding]::GetEncoding(
+            1252,
+            [System.Text.EncoderFallback]::ExceptionFallback,
+            [System.Text.DecoderFallback]::ExceptionFallback
+        )
+
+        # Parser-safe on Windows PowerShell 5.1.
+        $utf8 = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false, $true)
+
+        $bytes = $cp1252.GetBytes($value)
+        $candidate = $utf8.GetString($bytes)
+
+        if ($candidate.Contains([char]0xFFFD)) { return $value }
+
+        $after = Get-MojibakeSuspicionScore $candidate
+        if ($after -lt $before) {
+            return $candidate
+        }
+    } catch {
+        # If a safe round-trip is impossible, preserve the provider response.
+    }
+
+    return $value
+}
+
+function Translate-LibreTranslate([string]$text,[string]$sourceLang,[string]$targetLang,$settings) {
+    $map = $null
+    $protected = Protect-TranslationPlaceholders $text ([ref]$map)
+
+    $payload = [ordered]@{
+        q = $protected
+        source = $sourceLang
+        target = $targetLang
+        format = "text"
+    }
+    if (-not [string]::IsNullOrWhiteSpace([string]$settings.LibreKey)) {
+        $payload.api_key = [string]$settings.LibreKey
+    }
+
+    $endpoint = ([string]$settings.LibreEndpoint).TrimEnd('/')
+    $jsonBody = $payload | ConvertTo-Json -Compress
+    $bodyBytes = [System.Text.Encoding]::UTF8.GetBytes($jsonBody)
+
+    # Windows PowerShell 5.1 can decode JSON HTTP responses using the wrong
+    # legacy code page. Read the response stream as raw bytes and decode UTF-8
+    # explicitly before ConvertFrom-Json.
+    $request = [System.Net.HttpWebRequest]::Create("$endpoint/translate")
+    $request.Method = "POST"
+    $request.ContentType = "application/json; charset=utf-8"
+    $request.Accept = "application/json"
+    $request.Timeout = 45000
+    $request.ReadWriteTimeout = 45000
+    $request.ContentLength = $bodyBytes.Length
+
+    $requestStream = $null
+    $response = $null
+    $responseStream = $null
+    $memory = $null
+
+    try {
+        $requestStream = $request.GetRequestStream()
+        $requestStream.Write($bodyBytes, 0, $bodyBytes.Length)
+        $requestStream.Flush()
+        $requestStream.Close()
+        $requestStream = $null
+
+        $response = $request.GetResponse()
+        $responseStream = $response.GetResponseStream()
+
+        $memory = New-Object System.IO.MemoryStream
+        $buffer = New-Object byte[] 8192
+        while (($read = $responseStream.Read($buffer, 0, $buffer.Length)) -gt 0) {
+            $memory.Write($buffer, 0, $read)
+        }
+
+        $rawBytes = $memory.ToArray()
+        $utf8 = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false, $true)
+        $jsonText = $utf8.GetString($rawBytes)
+        $resp = $jsonText | ConvertFrom-Json
+
+        $translated = [string]$resp.translatedText
+        $translated = Repair-TranslationMojibake $translated
+        return (Restore-TranslationPlaceholders $translated $map)
+    } catch [System.Net.WebException] {
+        $err = $_.Exception
+        if ($null -ne $err.Response) {
+            try {
+                $errStream = $err.Response.GetResponseStream()
+                $errMemory = New-Object System.IO.MemoryStream
+                $errBuffer = New-Object byte[] 4096
+                while (($errRead = $errStream.Read($errBuffer, 0, $errBuffer.Length)) -gt 0) {
+                    $errMemory.Write($errBuffer, 0, $errRead)
+                }
+                $errBytes = $errMemory.ToArray()
+                $errUtf8 = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false, $false)
+                $errText = $errUtf8.GetString($errBytes)
+                throw "LibreTranslate HTTP error: $errText"
+            } catch {
+                if ($_.Exception.Message -like "LibreTranslate HTTP error:*") { throw }
+            }
+        }
+        throw
+    } finally {
+        if ($null -ne $requestStream) { $requestStream.Dispose() }
+        if ($null -ne $responseStream) { $responseStream.Dispose() }
+        if ($null -ne $response) { $response.Dispose() }
+        if ($null -ne $memory) { $memory.Dispose() }
+    }
+}
+
+
+function Get-DeepLApiBase($settings) {
+    if ($settings.DeepLPlan -eq "Pro") { return "https://api.deepl.com" }
+    return "https://api-free.deepl.com"
+}
+
+function Get-DeepLSupportedLanguages([string]$role, $settings) {
+    $kind = if ($role -eq "Target") { "target" } else { "source" }
+    $cacheKey = "DeepL|$($settings.DeepLPlan)|$kind"
+    if ($script:TranslationProviderLanguageCache.ContainsKey($cacheKey)) {
+        return @($script:TranslationProviderLanguageCache[$cacheKey])
+    }
+
+    $base = Get-DeepLApiBase $settings
+    $headers = @{ "Authorization" = "DeepL-Auth-Key $($settings.DeepLKey)" }
+    $resp = Invoke-RestMethod -Uri "$base/v2/languages?type=$kind" -Method Get -Headers $headers -TimeoutSec 8
+
+    $codes = @($resp | ForEach-Object { ([string]$_.language).ToUpperInvariant() } | Where-Object { $_ })
+    $script:TranslationProviderLanguageCache[$cacheKey] = $codes
+    return @($codes)
+}
+
+function Resolve-DeepLLanguageCode([string]$languageCode, [string]$role, $settings) {
+    $wanted = Get-ProviderLanguageCode "DeepL" $languageCode $role
+    if ([string]::IsNullOrWhiteSpace($wanted)) { return $null }
+
+    $supported = @(Get-DeepLSupportedLanguages $role $settings)
+    $wantedUpper = $wanted.ToUpperInvariant()
+
+    if ($supported -contains $wantedUpper) { return $wantedUpper }
+
+    # API language naming can evolve. Prefer a returned regional/script variant
+    # that belongs to the same language family.
+    $baseCode = $wantedUpper.Split('-')[0]
+    $family = @($supported | Where-Object { $_ -eq $baseCode -or $_.StartsWith("$baseCode-") })
+
+    if ($role -eq "Source" -and $family -contains $baseCode) {
+        return $baseCode
+    }
+
+    if ($family.Count -eq 1) { return [string]$family[0] }
+
+    # Stable preferences for ambiguous target families.
+    if ($role -eq "Target") {
+        switch ($languageCode) {
+            "en" {
+                foreach ($candidate in @("EN-US","EN-GB")) {
+                    if ($supported -contains $candidate) { return $candidate }
+                }
+            }
+            "pt" {
+                foreach ($candidate in @("PT-PT","PT-BR")) {
+                    if ($supported -contains $candidate) { return $candidate }
+                }
+            }
+            "pt-br" {
+                foreach ($candidate in @("PT-BR","PT-PT")) {
+                    if ($supported -contains $candidate) { return $candidate }
+                }
+            }
+            "zh-cn" {
+                foreach ($candidate in @("ZH-HANS","ZH")) {
+                    if ($supported -contains $candidate) { return $candidate }
+                }
+            }
+            "zh-tw" {
+                foreach ($candidate in @("ZH-HANT","ZH")) {
+                    if ($supported -contains $candidate) { return $candidate }
+                }
+            }
+        }
+    }
+
+    return $null
+}
+
+function Get-LibreTranslateLanguageData($settings) {
+    $endpoint = ([string]$settings.LibreEndpoint).TrimEnd('/')
+    $cacheKey = "LibreTranslate|$endpoint"
+    if ($script:TranslationProviderLanguageCache.ContainsKey($cacheKey)) {
+        return @($script:TranslationProviderLanguageCache[$cacheKey])
+    }
+
+    $uri = "$endpoint/languages"
+    if (-not [string]::IsNullOrWhiteSpace([string]$settings.LibreKey)) {
+        $escaped = [uri]::EscapeDataString([string]$settings.LibreKey)
+        $separator = if ($uri.Contains("?")) { "&" } else { "?" }
+        $uri = "$uri$separator" + "api_key=$escaped"
+    }
+
+    $resp = Invoke-RestMethod -Uri $uri -Method Get -TimeoutSec 8
+    $items = @($resp)
+    $script:TranslationProviderLanguageCache[$cacheKey] = $items
+    return @($items)
+}
+
+function Test-TranslationLanguagePair([string]$sourceLanguageCode, [string]$targetLanguageCode, $settings=$null) {
+    if ($null -eq $settings) { $settings = Get-TranslationProviderSettings }
+
+    if ($sourceLanguageCode -ieq $targetLanguageCode) {
+        return [pscustomobject]@{
+            Supported = $false
+            SourceProviderCode = ""
+            TargetProviderCode = ""
+            MessagePL = "Język źródłowy i docelowy muszą być różne."
+            MessageEN = "Source and target language must be different."
+        }
+    }
+
+    $provider = [string]$settings.Provider
+    try {
+        switch ($provider) {
+            "Google" {
+                $src = Get-ProviderLanguageCode "Google" $sourceLanguageCode "Source"
+                $dst = Get-ProviderLanguageCode "Google" $targetLanguageCode "Target"
+                $ok = -not [string]::IsNullOrWhiteSpace($src) -and -not [string]::IsNullOrWhiteSpace($dst)
+
+                return [pscustomobject]@{
+                    Supported = $ok
+                    SourceProviderCode = $src
+                    TargetProviderCode = $dst
+                    MessagePL = $(if ($ok) { "" } else { "Google Cloud nie ma mapowania dla jednego z wybranych języków." })
+                    MessageEN = $(if ($ok) { "" } else { "Google Cloud has no mapping for one of the selected languages." })
+                }
+            }
+
+            "DeepL" {
+                $src = Resolve-DeepLLanguageCode $sourceLanguageCode "Source" $settings
+                $dst = Resolve-DeepLLanguageCode $targetLanguageCode "Target" $settings
+                $ok = -not [string]::IsNullOrWhiteSpace($src) -and -not [string]::IsNullOrWhiteSpace($dst)
+
+                return [pscustomobject]@{
+                    Supported = $ok
+                    SourceProviderCode = $src
+                    TargetProviderCode = $dst
+                    MessagePL = $(if ($ok) { "" } else { "DeepL nie obsługuje obecnie jednej ze stron wybranej pary językowej." })
+                    MessageEN = $(if ($ok) { "" } else { "DeepL currently does not support one side of the selected language pair." })
+                }
+            }
+
+            "LibreTranslate" {
+                $src = Get-ProviderLanguageCode "LibreTranslate" $sourceLanguageCode "Source"
+                $dst = Get-ProviderLanguageCode "LibreTranslate" $targetLanguageCode "Target"
+
+                if ([string]::IsNullOrWhiteSpace($src) -or [string]::IsNullOrWhiteSpace($dst)) {
+                    return [pscustomobject]@{
+                        Supported = $false
+                        SourceProviderCode = $src
+                        TargetProviderCode = $dst
+                        MessagePL = "Brak mapowania LibreTranslate dla jednego z wybranych języków."
+                        MessageEN = "LibreTranslate mapping is missing for one of the selected languages."
+                    }
+                }
+
+                $languages = @(Get-LibreTranslateLanguageData $settings)
+                $sourceInfo = $languages | Where-Object { ([string]$_.code) -ieq $src } | Select-Object -First 1
+                $targetExists = @($languages | Where-Object { ([string]$_.code) -ieq $dst }).Count -gt 0
+
+                $pairSupported = $false
+                if ($null -ne $sourceInfo) {
+                    $targets = @($sourceInfo.targets | ForEach-Object { [string]$_ })
+                    if ($targets.Count -gt 0) {
+                        $pairSupported = @($targets | Where-Object { $_ -ieq $dst }).Count -gt 0
+                    } else {
+                        # Older/custom LibreTranslate implementations may expose only codes.
+                        $pairSupported = $targetExists
+                    }
+                }
+
+                return [pscustomobject]@{
+                    Supported = $pairSupported
+                    SourceProviderCode = $src
+                    TargetProviderCode = $dst
+                    MessagePL = $(if ($pairSupported) { "" } else { "Ten serwer LibreTranslate nie udostępnia wybranej pary językowej: $src → $dst." })
+                    MessageEN = $(if ($pairSupported) { "" } else { "This LibreTranslate server does not provide the selected language pair: $src -> $dst." })
+                }
+            }
+
+            default {
+                return [pscustomobject]@{
+                    Supported = $false
+                    SourceProviderCode = ""
+                    TargetProviderCode = ""
+                    MessagePL = "Nieznany dostawca automatycznego tłumaczenia."
+                    MessageEN = "Unknown automatic translation provider."
+                }
+            }
+        }
+    } catch {
+        $detail = $_.Exception.Message
+        return [pscustomobject]@{
+            Supported = $false
+            SourceProviderCode = ""
+            TargetProviderCode = ""
+            MessagePL = "Nie udało się sprawdzić obsługi języków przez $provider.`n`n$detail"
+            MessageEN = "Could not verify language support for $provider.`n`n$detail"
+        }
+    }
+}
+
+function Require-TranslationLanguagePair([string]$sourceLanguageCode, [string]$targetLanguageCode) {
+    $settings = Get-TranslationProviderSettings
+    $result = Test-TranslationLanguagePair $sourceLanguageCode $targetLanguageCode $settings
+
+    if (-not $result.Supported) {
+        $msg = if ($script:UiLanguage -eq "en") { $result.MessageEN } else { $result.MessagePL }
+        [System.Windows.MessageBox]::Show($msg, "Translation API") | Out-Null
+        return $null
+    }
+
+    return $result
+}
+
+function Translate-Configured([string]$text,[string]$sourceLang="en",[string]$targetLang="pl") {
+    if ([string]::IsNullOrWhiteSpace($text)) { return $text }
+
+    $settings = Get-TranslationProviderSettings
+    $pair = Test-TranslationLanguagePair $sourceLang $targetLang $settings
+
+    if (-not $pair.Supported) {
+        $message = if ($script:UiLanguage -eq "en") { $pair.MessageEN } else { $pair.MessagePL }
+        throw $message
+    }
+
+    $src = [string]$pair.SourceProviderCode
+    $dst = [string]$pair.TargetProviderCode
+
+    switch ($settings.Provider) {
+        "Google" { return Translate-GoogleCloud $text $src $dst $settings }
+        "DeepL" { return Translate-DeepL $text $src $dst $settings }
+        "LibreTranslate" { return Translate-LibreTranslate $text $src $dst $settings }
+        default { throw "Nieznany dostawca tłumaczenia: $($settings.Provider)" }
+    }
+}
+
+
+# ---------- Central language registry ----------
+$script:Languages = @(
+    [pscustomobject]@{ Code="en"; Name="English"; NativeName="English"; RimWorldFolder="English"; GoogleCode="en"; DeepLCode="EN"; LibreCode="en"; Flag="GB" },
+    [pscustomobject]@{ Code="pl"; Name="Polish"; NativeName="Polski"; RimWorldFolder="Polish"; GoogleCode="pl"; DeepLCode="PL"; LibreCode="pl"; Flag="PL" },
+    [pscustomobject]@{ Code="de"; Name="German"; NativeName="Deutsch"; RimWorldFolder="German"; GoogleCode="de"; DeepLCode="DE"; LibreCode="de"; Flag="DE" },
+    [pscustomobject]@{ Code="fr"; Name="French"; NativeName="Français"; RimWorldFolder="French"; GoogleCode="fr"; DeepLCode="FR"; LibreCode="fr"; Flag="FR" },
+    [pscustomobject]@{ Code="es"; Name="Spanish"; NativeName="Español"; RimWorldFolder="Spanish"; GoogleCode="es"; DeepLCode="ES"; LibreCode="es"; Flag="ES" },
+    [pscustomobject]@{ Code="it"; Name="Italian"; NativeName="Italiano"; RimWorldFolder="Italian"; GoogleCode="it"; DeepLCode="IT"; LibreCode="it"; Flag="IT" },
+    [pscustomobject]@{ Code="pt"; Name="Portuguese"; NativeName="Português"; RimWorldFolder="Portuguese"; GoogleCode="pt"; DeepLCode="PT-PT"; LibreCode="pt"; Flag="PT" },
+    [pscustomobject]@{ Code="pt-br"; Name="Portuguese (Brazil)"; NativeName="Português (Brasil)"; RimWorldFolder="Brazilian"; GoogleCode="pt"; DeepLCode="PT-BR"; LibreCode="pt"; Flag="BR" },
+    [pscustomobject]@{ Code="cs"; Name="Czech"; NativeName="Čeština"; RimWorldFolder="Czech"; GoogleCode="cs"; DeepLCode="CS"; LibreCode="cs"; Flag="CZ" },
+    [pscustomobject]@{ Code="uk"; Name="Ukrainian"; NativeName="Українська"; RimWorldFolder="Ukrainian"; GoogleCode="uk"; DeepLCode="UK"; LibreCode="uk"; Flag="UA" },
+    [pscustomobject]@{ Code="ru"; Name="Russian"; NativeName="Русский"; RimWorldFolder="Russian"; GoogleCode="ru"; DeepLCode="RU"; LibreCode="ru"; Flag="RU" },
+    [pscustomobject]@{ Code="ja"; Name="Japanese"; NativeName="日本語"; RimWorldFolder="Japanese"; GoogleCode="ja"; DeepLCode="JA"; LibreCode="ja"; Flag="JP" },
+    [pscustomobject]@{ Code="ko"; Name="Korean"; NativeName="한국어"; RimWorldFolder="Korean"; GoogleCode="ko"; DeepLCode="KO"; LibreCode="ko"; Flag="KR" },
+    [pscustomobject]@{ Code="zh-cn"; Name="Chinese (Simplified)"; NativeName="简体中文"; RimWorldFolder="ChineseSimplified"; GoogleCode="zh-CN"; DeepLCode="ZH"; LibreCode="zh"; Flag="CN" },
+    [pscustomobject]@{ Code="zh-tw"; Name="Chinese (Traditional)"; NativeName="繁體中文"; RimWorldFolder="ChineseTraditional"; GoogleCode="zh-TW"; DeepLCode="ZH"; LibreCode="zt"; Flag="TW" },
+    [pscustomobject]@{ Code="nl"; Name="Dutch"; NativeName="Nederlands"; RimWorldFolder="Dutch"; GoogleCode="nl"; DeepLCode="NL"; LibreCode="nl"; Flag="NL" },
+    [pscustomobject]@{ Code="sv"; Name="Swedish"; NativeName="Svenska"; RimWorldFolder="Swedish"; GoogleCode="sv"; DeepLCode="SV"; LibreCode="sv"; Flag="SE" }
+)
+
+function Get-LanguageByCode([string]$code) {
+    if ([string]::IsNullOrWhiteSpace($code)) { return $null }
+    return $script:Languages | Where-Object { $_.Code -ieq $code } | Select-Object -First 1
+}
+
+function Get-LanguageByRimWorldFolder([string]$folderName) {
+    if ([string]::IsNullOrWhiteSpace($folderName)) { return $null }
+    return $script:Languages | Where-Object { $_.RimWorldFolder -ieq $folderName } | Select-Object -First 1
+}
+
+function Get-LanguageDisplayName($lang) {
+    if ($null -eq $lang) { return "" }
+    if ([string]::IsNullOrWhiteSpace([string]$lang.NativeName) -or $lang.NativeName -eq $lang.Name) {
+        return [string]$lang.Name
+    }
+    return "$($lang.Name) / $($lang.NativeName)"
+}
+
+function Populate-LanguageCombo($combo, [string]$selectedCode) {
+    if ($null -eq $combo) { return }
+    $combo.Items.Clear()
+
+    foreach ($lang in $script:Languages) {
+        $item = New-Object System.Windows.Controls.ComboBoxItem
+        $item.Content = Get-LanguageDisplayName $lang
+        $item.Tag = $lang.Code
+        [void]$combo.Items.Add($item)
+        if ($lang.Code -ieq $selectedCode) {
+            $combo.SelectedItem = $item
+        }
+    }
+
+    if ($null -eq $combo.SelectedItem -and $combo.Items.Count -gt 0) {
+        $combo.SelectedIndex = 0
+    }
+}
+
+function Get-SelectedLanguageFromCombo($combo) {
+    if ($null -eq $combo -or $null -eq $combo.SelectedItem) { return $null }
+    return Get-LanguageByCode ([string]$combo.SelectedItem.Tag)
+}
+
+function Get-ProviderLanguageCode([string]$provider, [string]$languageCode, [string]$role="Any") {
+    $lang = Get-LanguageByCode $languageCode
+    if ($null -eq $lang) { return $null }
+
+    switch ($provider) {
+        "Google" {
+            return [string]$lang.GoogleCode
+        }
+        "LibreTranslate" {
+            return [string]$lang.LibreCode
+        }
+        "DeepL" {
+            # DeepL distinguishes some source and target language variants.
+            switch ([string]$lang.Code) {
+                "en" {
+                    if ($role -eq "Target") { return "EN-US" }
+                    return "EN"
+                }
+                "pt" {
+                    if ($role -eq "Target") { return "PT-PT" }
+                    return "PT"
+                }
+                "pt-br" {
+                    if ($role -eq "Target") { return "PT-BR" }
+                    return "PT"
+                }
+                "zh-cn" {
+                    if ($role -eq "Target") { return "ZH-HANS" }
+                    return "ZH"
+                }
+                "zh-tw" {
+                    if ($role -eq "Target") { return "ZH-HANT" }
+                    return "ZH"
+                }
+                default {
+                    return [string]$lang.DeepLCode
+                }
+            }
+        }
+        default { return $null }
+    }
+}
+
+function Get-SelectedSourceLanguage {
+    return Get-SelectedLanguageFromCombo $cmbSourceLang
+}
+function Get-SelectedTargetLanguage {
+    return Get-SelectedLanguageFromCombo $cmbTargetLang
+}
+function Get-SelectedSourceLanguageCode {
+    $l = Get-SelectedSourceLanguage
+    if ($null -eq $l) { return "en" }
+    return [string]$l.Code
+}
+function Get-SelectedTargetLanguageCode {
+    $l = Get-SelectedTargetLanguage
+    if ($null -eq $l) { return "pl" }
+    return [string]$l.Code
+}
+function Get-SelectedSourceRimWorldFolder {
+    $l = Get-SelectedSourceLanguage
+    if ($null -eq $l) { return "English" }
+    return [string]$l.RimWorldFolder
+}
+function Get-SelectedTargetRimWorldFolder {
+    $l = Get-SelectedTargetLanguage
+    if ($null -eq $l) { return "Polish" }
+    return [string]$l.RimWorldFolder
+}
+
+
+
+
+function Test-MultilingualConfiguration {
+    $issues = New-Object System.Collections.ArrayList
+
+    foreach ($lang in $script:Languages) {
+        if ([string]::IsNullOrWhiteSpace([string]$lang.Code)) { [void]$issues.Add("Language without Code") }
+        if ([string]::IsNullOrWhiteSpace([string]$lang.RimWorldFolder)) { [void]$issues.Add("$($lang.Code): missing RimWorldFolder") }
+        if ([string]::IsNullOrWhiteSpace([string]$lang.GoogleCode)) { [void]$issues.Add("$($lang.Code): missing GoogleCode") }
+        if ([string]::IsNullOrWhiteSpace([string]$lang.LibreCode)) { [void]$issues.Add("$($lang.Code): missing LibreCode") }
+    }
+
+    $seenFolders = @{}
+    foreach ($lang in $script:Languages) {
+        $key = ([string]$lang.RimWorldFolder).ToLowerInvariant()
+        if ($seenFolders.ContainsKey($key)) {
+            [void]$issues.Add("Duplicate RimWorldFolder: $($lang.RimWorldFolder)")
+        } else {
+            $seenFolders[$key] = $true
+        }
+    }
+
+    foreach ($lang in $script:Languages) {
+        $pkg = Get-TranslationPackageId "example.mod" $lang.Code
+        if ($pkg -notmatch '^example\.mod\.[a-z0-9]+\.[a-z0-9]+$') {
+            [void]$issues.Add("$($lang.Code): invalid generated packageId $pkg")
+        }
+    }
+
+    return @($issues)
 }
 
 # ---------- RimWorld profile ----------
@@ -209,83 +1319,14 @@ function Add-Entry([string]$kind, [string]$relativeFile, [string]$key, [string]$
 }
 
 function Get-LanguageRoots([string]$modPath) {
-    $roots = New-Object System.Collections.ArrayList
-    $seen = @{}
-
-    function Add-LanguageRoot([string]$p) {
-        if ([string]::IsNullOrWhiteSpace($p)) { return }
-        if (-not [System.IO.Path]::IsPathRooted($p)) { $p = Join-Path $modPath $p }
-        if (-not (Test-Path $p)) { return }
-
-        try {
-            $norm = [System.IO.Path]::GetFullPath($p).TrimEnd('\','/').ToLowerInvariant()
-        } catch {
-            $norm = $p.TrimEnd('\','/').ToLowerInvariant()
-        }
-
-        if (-not $seen.ContainsKey($norm)) {
-            $seen[$norm] = $true
-            [void]$roots.Add($p)
-        }
-    }
-
-    # Classic root localization.
-    Add-LanguageRoot (Join-Path $modPath "Languages\English")
-
-    $preferred = Get-PreferredContentVersion $modPath
-    if ($preferred) {
-        Add-LanguageRoot (Join-Path (Join-Path $modPath $preferred) "Languages\English")
-    }
-
-    # Follow LoadFolders.xml for the selected RimWorld version.
-    $loadFolders = Join-Path $modPath "LoadFolders.xml"
-    if (Test-Path $loadFolders) {
-        try {
-            [xml]$lf = Get-Content -LiteralPath $loadFolders -Raw -Encoding UTF8
-            $section = $null
-
-            if ($preferred) {
-                $section = $lf.loadFolders.SelectSingleNode("v$preferred")
-            }
-
-            if ($null -eq $section) {
-                $sections = @($lf.loadFolders.ChildNodes | Where-Object {
-                    $_.NodeType -eq [System.Xml.XmlNodeType]::Element -and $_.Name -match '^v[0-9]+\.[0-9]+$'
-                })
-
-                $section = $sections | Sort-Object {
-                    $v = $_.Name.Substring(1)
-                    $t = Get-VersionTuple $v
-                    ($t[0] * 1000) + $t[1]
-                } -Descending | Select-Object -First 1
-            }
-
-            if ($null -ne $section) {
-                foreach ($li in $section.SelectNodes("li")) {
-                    $rel = $li.InnerText.Trim()
-
-                    if (-not $rel -or $rel -eq "/") {
-                        Add-LanguageRoot (Join-Path $modPath "Languages\English")
-                        continue
-                    }
-
-                    $base = Join-Path $modPath $rel
-                    Add-LanguageRoot (Join-Path $base "Languages\English")
-                }
-            }
-        } catch {}
-    }
-
-    return @($roots)
+    return @(Get-LanguageRootsForCode $modPath (Get-SelectedSourceLanguageCode))
 }
 
 
 function Get-LanguageFolderName([string]$code) {
-    switch ($code) {
-        "pl" { return "Polish" }
-        "en" { return "English" }
-        default { return $code }
-    }
+    $lang = Get-LanguageByCode $code
+    if ($null -ne $lang) { return [string]$lang.RimWorldFolder }
+    return $code
 }
 
 function Get-LanguageRootsForCode([string]$modPath, [string]$code) {
@@ -395,7 +1436,8 @@ function Update-LanguageCoverage([string]$modPath) {
     $script:ExistingTranslations = @{}
 
     $sourceCount = $script:Entries.Count
-    foreach ($code in @("pl","en")) {
+    foreach ($lang in $script:Languages) {
+        $code = [string]$lang.Code
         $entries = Read-LanguageEntries $modPath $code
         $script:ExistingTranslations[$code] = $entries
 
@@ -405,17 +1447,8 @@ function Update-LanguageCoverage([string]$modPath) {
             if ($entries.ContainsKey($id)) { $matched++ }
         }
 
-        $percent = if ($sourceCount -gt 0) {
-            [Math]::Round(($matched * 100.0) / $sourceCount, 1)
-        } else { 0 }
-
-        $status = if ($matched -eq 0) {
-            "none"
-        } elseif ($matched -lt $sourceCount) {
-            "partial"
-        } else {
-            "complete"
-        }
+        $percent = if ($sourceCount -gt 0) { [Math]::Round(($matched * 100.0) / $sourceCount, 1) } else { 0 }
+        $status = if ($matched -eq 0) { "none" } elseif ($matched -lt $sourceCount) { "partial" } else { "complete" }
 
         $script:LanguageCoverage[$code] = [pscustomobject]@{
             Found = $entries.Count
@@ -428,14 +1461,7 @@ function Update-LanguageCoverage([string]$modPath) {
 }
 
 
-function Get-SelectedTargetLanguageCode {
-    try {
-        if ($null -ne $cmbTargetLang -and $null -ne $cmbTargetLang.SelectedItem) {
-            return [string]$cmbTargetLang.SelectedItem.Tag
-        }
-    } catch {}
-    return "pl"
-}
+
 
 function AutoLoad-ExistingTargetTranslation {
     $code = Get-SelectedTargetLanguageCode
@@ -490,10 +1516,10 @@ function Scan-EnglishLanguages([string]$modPath) {
     $countBefore = $script:Entries.Count
     $roots = @(Get-LanguageRoots $modPath)
 
-    foreach ($english in $roots) {
-        if (-not (Test-Path $english)) { continue }
+    foreach ($sourceRoot in $roots) {
+        if (-not (Test-Path $sourceRoot)) { continue }
 
-        Get-ChildItem -LiteralPath $english -Recurse -Filter *.xml -File -ErrorAction SilentlyContinue | ForEach-Object {
+        Get-ChildItem -LiteralPath $sourceRoot -Recurse -Filter *.xml -File -ErrorAction SilentlyContinue | ForEach-Object {
             $file = $_
 
             try {
@@ -503,7 +1529,7 @@ function Scan-EnglishLanguages([string]$modPath) {
                 $rootName = $doc.DocumentElement.Name
                 if ($rootName -ne "LanguageData") { return }
 
-                $rel = $file.FullName.Substring($english.Length).TrimStart('\','/')
+                $rel = $file.FullName.Substring($sourceRoot.Length).TrimStart('\','/')
 
                 # Preserve the localization branch:
                 # Keyed\Foo.xml -> Keyed\Foo.xml
@@ -1452,11 +2478,33 @@ function Open-ExistingTranslationMod([string]$translationModPath) {
 
 
 
+
+function Show-ModernFolderPicker([string]$description, [string]$initialPath="") {
+    $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
+    $dlg.Description = $description
+    $dlg.ShowNewFolderButton = $true
+
+    # On supported Windows/.NET versions this switches FolderBrowserDialog
+    # to the newer Explorer-style shell picker with breadcrumb/address navigation.
+    try { $dlg.AutoUpgradeEnabled = $true } catch {}
+
+    if (-not [string]::IsNullOrWhiteSpace($initialPath) -and (Test-Path -LiteralPath $initialPath)) {
+        try { $dlg.SelectedPath = [System.IO.Path]::GetFullPath($initialPath) } catch {}
+    }
+
+    $result = $dlg.ShowDialog()
+    if ($result -eq [System.Windows.Forms.DialogResult]::OK -and
+        -not [string]::IsNullOrWhiteSpace([string]$dlg.SelectedPath)) {
+        return [string]$dlg.SelectedPath
+    }
+    return $null
+}
+
 function Show-PathInputDialog([string]$title, [string]$prompt, [string]$defaultValue="") {
     $w = New-Object System.Windows.Window
     $w.Title = $title
-    $w.Width = 720
-    $w.Height = 180
+    $w.Width = 780
+    $w.Height = 195
     $w.WindowStartupLocation = "CenterOwner"
     $w.Owner = $window
     $w.ResizeMode = "NoResize"
@@ -1480,12 +2528,30 @@ function Show-PathInputDialog([string]$title, [string]$prompt, [string]$defaultV
     [System.Windows.Controls.Grid]::SetRow($lbl,0)
     [void]$grid.Children.Add($lbl)
 
+    $pathGrid = New-Object System.Windows.Controls.Grid
+    $c1 = New-Object System.Windows.Controls.ColumnDefinition
+    $c1.Width = "*"
+    $c2 = New-Object System.Windows.Controls.ColumnDefinition
+    $c2.Width = "Auto"
+    [void]$pathGrid.ColumnDefinitions.Add($c1)
+    [void]$pathGrid.ColumnDefinitions.Add($c2)
+
     $tb = New-Object System.Windows.Controls.TextBox
     $tb.Text = $defaultValue
     $tb.AllowDrop = $true
     $tb.VerticalContentAlignment = "Center"
-    [System.Windows.Controls.Grid]::SetRow($tb,1)
-    [void]$grid.Children.Add($tb)
+    [System.Windows.Controls.Grid]::SetColumn($tb,0)
+    [void]$pathGrid.Children.Add($tb)
+
+    $browse = New-Object System.Windows.Controls.Button
+    $browse.Content = if ($script:UiLanguage -eq "en") { "Browse..." } else { "Przeglądaj..." }
+    $browse.Margin = "8,0,0,0"
+    $browse.MinWidth = 105
+    [System.Windows.Controls.Grid]::SetColumn($browse,1)
+    [void]$pathGrid.Children.Add($browse)
+
+    [System.Windows.Controls.Grid]::SetRow($pathGrid,1)
+    [void]$grid.Children.Add($pathGrid)
 
     $tb.Add_Drop({
         param($sender,$e)
@@ -1509,13 +2575,18 @@ function Show-PathInputDialog([string]$title, [string]$prompt, [string]$defaultV
     $ok.Margin = "0,0,8,0"
 
     $cancel = New-Object System.Windows.Controls.Button
-    $cancel.Content = "Anuluj"
+    $cancel.Content = if ($script:UiLanguage -eq "en") { "Cancel" } else { "Anuluj" }
     $cancel.Width = 90
 
     [void]$panel.Children.Add($ok)
     [void]$panel.Children.Add($cancel)
     [System.Windows.Controls.Grid]::SetRow($panel,2)
     [void]$grid.Children.Add($panel)
+
+    $browse.Add_Click({
+        $picked = Show-ModernFolderPicker $title $tb.Text
+        if ($picked) { $tb.Text = $picked }
+    })
 
     $result = $null
     $ok.Add_Click({
@@ -1720,10 +2791,9 @@ function Analyze-Mod([string]$modPath) {
 
     Read-AboutXml $modPath
 
-    # IMPORTANT: Languages/English and Defs are complementary.
-    # A mod may provide only some strings in Keyed while keeping Def labels/descriptions in Defs.
+    $sourceCode = Get-SelectedSourceLanguageCode
     $langCount = Scan-EnglishLanguages $modPath
-    $defsCount = Scan-Defs $modPath
+    $defsCount = if ($sourceCode -eq "en") { Scan-Defs $modPath } else { 0 }
     $keybindScan = Scan-KeyBindingDefs $modPath
 
     # DLL/UI diagnostics are intentionally lazy and run only on button press.
@@ -1744,8 +2814,10 @@ function Analyze-Mod([string]$modPath) {
         DefEntries = $defsCount
         ContentVersion = $script:SelectedContentVersion
         Total = $script:Entries.Count
-        PolishCoverage = $script:LanguageCoverage["pl"]
-        EnglishCoverage = $script:LanguageCoverage["en"]
+        SourceLanguage = $sourceCode
+        TargetLanguage = Get-SelectedTargetLanguageCode
+        SourceCoverage = $script:LanguageCoverage[$sourceCode]
+        TargetCoverage = $script:LanguageCoverage[(Get-SelectedTargetLanguageCode)]
         AutoLoadedExisting = $autoLoaded
         KeyBindingDefs = $keybindScan.Total
         KeyBindingLocalizable = $keybindScan.Localizable
@@ -1755,14 +2827,45 @@ function Analyze-Mod([string]$modPath) {
     }
 }
 
-function Export-Csv([string]$path) {
+function Export-ToolkitCsv([string]$path) {
+    $sourceCode = Get-SelectedSourceLanguageCode
+    $targetCode = Get-SelectedTargetLanguageCode
+
     $script:Entries |
-        Select-Object Kind,File,Key,Source,Translation,DefType,DefName,Field |
-        Export-Csv -LiteralPath $path -NoTypeInformation -Encoding UTF8 -Delimiter ';'
+        Select-Object Kind,File,Key,Source,Translation,DefType,DefName,Field,
+            @{N="SourceLanguage";E={$sourceCode}},
+            @{N="TargetLanguage";E={$targetCode}} |
+        Microsoft.PowerShell.Utility\Export-Csv -LiteralPath $path -NoTypeInformation -Encoding UTF8 -Delimiter ';'
 }
 
-function Import-Csv([string]$path) {
-    $rows = Import-Csv -LiteralPath $path -Encoding UTF8 -Delimiter ';'
+function Import-ToolkitCsv([string]$path) {
+    $rows = Microsoft.PowerShell.Utility\Import-Csv -LiteralPath $path -Encoding UTF8 -Delimiter ';'
+    # CSV language metadata is optional for backward compatibility.
+    # When present, warn if the file was exported for a different pair.
+    try {
+        $metaRow = $rows | Select-Object -First 1
+        if ($null -ne $metaRow -and
+            $metaRow.PSObject.Properties.Name -contains "SourceLanguage" -and
+            $metaRow.PSObject.Properties.Name -contains "TargetLanguage") {
+
+            $csvSource = [string]$metaRow.SourceLanguage
+            $csvTarget = [string]$metaRow.TargetLanguage
+            $currentSource = Get-SelectedSourceLanguageCode
+            $currentTarget = Get-SelectedTargetLanguageCode
+
+            if ((-not [string]::IsNullOrWhiteSpace($csvSource) -and $csvSource -ine $currentSource) -or
+                (-not [string]::IsNullOrWhiteSpace($csvTarget) -and $csvTarget -ine $currentTarget)) {
+
+                $msg = if ($script:UiLanguage -eq "en") {
+                    "CSV language metadata: $csvSource → $csvTarget`nCurrent selection: $currentSource → $currentTarget`n`nThe file will still be imported. Verify that this is intentional."
+                } else {
+                    "Języki zapisane w CSV: $csvSource → $csvTarget`nAktualny wybór: $currentSource → $currentTarget`n`nPlik zostanie zaimportowany. Sprawdź, czy to zamierzone."
+                }
+                [System.Windows.MessageBox]::Show($msg,"CSV") | Out-Null
+            }
+        }
+    } catch {}
+
     $lookup = @{}
     foreach ($r in $rows) { $lookup["$($r.Kind)|$($r.File)|$($r.Key)"] = $r }
 
@@ -1924,6 +3027,19 @@ function Draw-FlagOverlay([System.Drawing.Graphics]$g, [string]$flagCode, [int]$
     }
 }
 
+
+function Select-PreviewFlagForTargetLanguage {
+    if ($null -eq $cmbPreviewFlag) { return }
+    $lang = Get-SelectedTargetLanguage
+    if ($null -eq $lang) { return }
+    foreach ($item in $cmbPreviewFlag.Items) {
+        if ([string]$item.Tag -ieq [string]$lang.Flag) {
+            $cmbPreviewFlag.SelectedItem = $item
+            break
+        }
+    }
+}
+
 function Build-TranslationPreview([string]$outMod, [string]$flagCode) {
     if ([string]::IsNullOrWhiteSpace($script:OriginalModPath)) { return $false }
 
@@ -1976,30 +3092,61 @@ function Build-TranslationPreview([string]$outMod, [string]$flagCode) {
 }
 
 
-function Get-TargetLanguageInfo {
-    $code = "pl"
-    try {
-        if ($null -ne $cmbTargetLang.SelectedItem) {
-            $code = [string]$cmbTargetLang.SelectedItem.Tag
-        }
-    } catch {}
 
-    switch ($code) {
-        "pl" {
-            return [pscustomobject]@{
-                Code="pl"; RimWorldFolder="Polish"; DisplayEnglish="Polish"; DisplayNative="Polskie"; WorkshopSuffix="Polish Translation"
-            }
-        }
-        "en" {
-            return [pscustomobject]@{
-                Code="en"; RimWorldFolder="English"; DisplayEnglish="English"; DisplayNative="English"; WorkshopSuffix="English Translation"
-            }
-        }
-        default {
-            return [pscustomobject]@{
-                Code=$code; RimWorldFolder="Polish"; DisplayEnglish="Translation"; DisplayNative="Translation"; WorkshopSuffix="Translation"
-            }
-        }
+function Get-ToolkitCreatorId {
+    $path = Join-Path (Get-ToolkitSettingsDirectory) "creator-id.txt"
+    if (Test-Path -LiteralPath $path) {
+        try {
+            $v = (Get-Content -LiteralPath $path -Raw -Encoding UTF8).Trim()
+            if (-not [string]::IsNullOrWhiteSpace($v)) { return $v }
+        } catch {}
+    }
+    $author = ""
+    try { $author = [string]$txtAuthor.Text } catch {}
+    if ([string]::IsNullOrWhiteSpace($author)) { $author = "mtt" }
+    $id = ($author.ToLowerInvariant() -replace '[^a-z0-9]+','').Trim()
+    if ([string]::IsNullOrWhiteSpace($id)) { $id = "mtt" }
+    return $id
+}
+
+function Save-ToolkitCreatorId([string]$creatorId) {
+    $creatorId = ($creatorId.ToLowerInvariant() -replace '[^a-z0-9]+','').Trim()
+    if ([string]::IsNullOrWhiteSpace($creatorId)) { throw "Creator ID cannot be empty." }
+    $path = Join-Path (Get-ToolkitSettingsDirectory) "creator-id.txt"
+    [System.IO.File]::WriteAllText($path, $creatorId, (New-Object System.Text.UTF8Encoding($false)))
+    return $creatorId
+}
+
+function Get-TranslationPackageId([string]$originalPackageId, [string]$targetLanguageCode) {
+    if ([string]::IsNullOrWhiteSpace($originalPackageId)) { return "" }
+    $creatorId = Get-ToolkitCreatorId
+    $lang = ($targetLanguageCode.ToLowerInvariant() -replace '[^a-z0-9]+','').Trim()
+    if ([string]::IsNullOrWhiteSpace($lang)) { $lang = "translation" }
+    return ("$originalPackageId.$creatorId.$lang").ToLowerInvariant()
+}
+
+function Get-TranslationModDisplayName([string]$originalName, $langInfo) {
+    $languageName = [string]$langInfo.DisplayEnglish
+    if ([string]::IsNullOrWhiteSpace($languageName)) { $languageName = [string]$langInfo.Name }
+    if ([string]::IsNullOrWhiteSpace($languageName)) { $languageName = "Translation" }
+
+    if ($languageName -eq "Translation") { return "$originalName - Translation" }
+    return "$originalName - $languageName Translation"
+}
+
+function Get-TargetLanguageInfo {
+    $lang = Get-SelectedTargetLanguage
+    if ($null -eq $lang) { $lang = Get-LanguageByCode "pl" }
+
+    return [pscustomobject]@{
+        Code = [string]$lang.Code
+        RimWorldFolder = [string]$lang.RimWorldFolder
+        DisplayEnglish = [string]$lang.Name
+        DisplayNative = [string]$lang.NativeName
+        WorkshopSuffix = "$($lang.Name) Translation"
+        WorkshopTitle = "$($lang.Name) Translation"
+        NativeDisplay = [string]$lang.NativeName
+        Flag = [string]$lang.Flag
     }
 }
 
@@ -2032,11 +3179,11 @@ function Get-SteamWorkshopDescriptionText([string]$translationAuthor) {
     $description = @"
 [h1]$($script:OriginalModName) - $($lang.WorkshopSuffix)[/h1]
 
-$($lang.DisplayEnglish) translation for [b]$($script:OriginalModName)[/b].
+$($lang.DisplayEnglish) translation for [b]$($script:OriginalModName)[/b].`r`nTarget language: [b]$($lang.DisplayNative)[/b].
 
 [b]Requires the original mod.[/b]
 
-[h1]Requirements[/h1]
+[h1]Translation Info[/h1]`r`n[list]`r`n[*]Language: $($lang.DisplayEnglish) / $($lang.DisplayNative)`r`n[*]PackageId: $(Get-TranslationPackageId $script:OriginalPackageId $lang.Code)`r`n[/list]`r`n`r`n[h1]Requirements[/h1]
 [list]
 [*]$requirements
 [/list]
@@ -2083,6 +3230,8 @@ function Build-TranslationMod([string]$parentFolder) {
     }
 
     $safeName = ($script:OriginalModName -replace '[\\/:*?"<>|]', '_')
+    $displayName = Get-TranslationModDisplayName $script:OriginalModName $lang
+    $safeDisplayName = ($displayName -replace '[\\/:*?"<>|]', '_')
     $isEditingExisting = -not [string]::IsNullOrWhiteSpace($script:EditingTranslationModPath)
 
     if ($isEditingExisting) {
@@ -2095,7 +3244,7 @@ function Build-TranslationMod([string]$parentFolder) {
             Remove-Item -LiteralPath $targetLanguageRoot -Recurse -Force
         }
     } else {
-        $outMod = Join-Path $parentFolder "$safeName - $($lang.WorkshopSuffix)"
+        $outMod = Join-Path $parentFolder $safeDisplayName
         if (Test-Path $outMod) {
             Remove-Item -LiteralPath $outMod -Recurse -Force
         }
@@ -2107,7 +3256,7 @@ function Build-TranslationMod([string]$parentFolder) {
     $author = $txtAuthor.Text.Trim()
     if ([string]::IsNullOrWhiteSpace($author)) { $author = "Community translation" }
 
-    $pkg = ($script:OriginalPackageId + "." + $lang.Code + "translation").ToLowerInvariant()
+    $pkg = Get-TranslationPackageId $script:OriginalPackageId $lang.Code
 
     $supportedXml = ""
     if ($script:OriginalSupportedVersions.Count -gt 0) {
@@ -2138,11 +3287,11 @@ function Build-TranslationMod([string]$parentFolder) {
     $aboutText = @"
 <?xml version="1.0" encoding="utf-8"?>
 <ModMetaData>
-  <name>$([System.Security.SecurityElement]::Escape($script:OriginalModName)) - $($lang.WorkshopSuffix)</name>
+  <name>$([System.Security.SecurityElement]::Escape($displayName))</name>
   <author>$([System.Security.SecurityElement]::Escape($author))</author>
   <packageId>$pkg</packageId>
   <modVersion>1.0.0</modVersion>
-$supportedXml  <description>$($lang.DisplayEnglish) translation for $([System.Security.SecurityElement]::Escape($script:OriginalModName)). Requires the original mod.
+$supportedXml  <description>$($lang.DisplayEnglish) translation for $([System.Security.SecurityElement]::Escape($script:OriginalModName)). Target language: $($lang.DisplayNative). Requires the original mod.
 
 Created with Mod Translation Toolkit.
 Project: https://github.com/DrizztGaming/Mod-Translation-Toolkit</description>
@@ -2189,15 +3338,19 @@ $dependencyLinks    </li>
     $report = @"
 Mod Translation Toolkit v$AppVersion
 Original mod: $($script:OriginalModName)
-PackageId: $($script:OriginalPackageId)
+Original PackageId: $($script:OriginalPackageId)
+Generated PackageId: $(Get-TranslationPackageId $script:OriginalPackageId (Get-SelectedTargetLanguageCode))
+Creator ID: $(Get-ToolkitCreatorId)
 Selected content version: $($script:SelectedContentVersion)
 Language roots: $((Get-LanguageRoots $script:OriginalModPath) -join "; ")`nKeyed entries: $keyed
 DefInjected entries: $defs
 Translated entries: $translated
 Total unique entries: $($script:Entries.Count)
 Steam Workshop description: $steamDescriptionPath
-Polish existing coverage: $((Get-CoverageText "pl"))
-English existing coverage: $((Get-CoverageText "en"))
+Source language: $((Get-SelectedSourceLanguageCode)) / $((Get-SelectedSourceRimWorldFolder))
+Target language: $((Get-SelectedTargetLanguageCode)) / $((Get-SelectedTargetRimWorldFolder))
+Source existing coverage: $((Get-CoverageText (Get-SelectedSourceLanguageCode)))
+Target existing coverage: $((Get-CoverageText (Get-SelectedTargetLanguageCode)))
 Existing target entries auto-loaded: $((AutoLoad-ExistingTargetTranslation))
 Preview generated: $previewCreated
 "@
@@ -3106,7 +4259,7 @@ function Get-WorkshopPublishedFileDetails([string]$publishedFileId) {
         "publishedfileids[0]" = $publishedFileId
     }
 
-    $response = Invoke-RestMethod -Uri $uri -Method Post -Body $body -TimeoutSec 20
+    $response = Invoke-RestMethod -Uri $uri -Method Post -Body $body -TimeoutSec 8
     $detail = $response.response.publishedfiledetails | Select-Object -First 1
 
     if ($null -eq $detail) {
@@ -3218,8 +4371,12 @@ function Refresh-AllWorkshopItems {
 
 function Apply-CreatorProfileToTranslator {
     $name = [string]$script:CreatorProfile.CreatorName
-    if (-not [string]::IsNullOrWhiteSpace($name)) {
-        $txtTranslator.Text = $name
+
+    if ($null -ne $txtCreatorName) { $txtCreatorName.Text = $name }
+    if ($null -ne $txtSteamProfile) { $txtSteamProfile.Text = [string]$script:CreatorProfile.SteamProfile }
+
+    if (-not [string]::IsNullOrWhiteSpace($name) -and $null -ne $txtAuthor) {
+        $txtAuthor.Text = $name
     }
 }
 
@@ -3227,7 +4384,7 @@ function Apply-CreatorProfileToTranslator {
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Mod Translation Toolkit v0.5.5"
+        Title="Mod Translation Toolkit v0.7.8"
         Height="840" Width="1260"
         WindowStartupLocation="CenterScreen"
         Background="#121018"
@@ -3283,16 +4440,35 @@ function Apply-CreatorProfileToTranslator {
       <Setter Property="Background" Value="#EEEAF3"/>
       <Setter Property="Foreground" Value="#17131D"/>
       <Setter Property="Padding" Value="7,4"/>
-      <Style.Triggers>
-        <Trigger Property="IsHighlighted" Value="True">
-          <Setter Property="Background" Value="#B38AE6"/>
-          <Setter Property="Foreground" Value="#17131D"/>
-        </Trigger>
-        <Trigger Property="IsSelected" Value="True">
-          <Setter Property="Background" Value="#9355DB"/>
-          <Setter Property="Foreground" Value="White"/>
-        </Trigger>
-      </Style.Triggers>
+      <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="ComboBoxItem">
+            <Border Name="ItemBorder"
+                    Background="{TemplateBinding Background}"
+                    BorderBrush="#C7B5D8"
+                    BorderThickness="0,0,0,1"
+                    Padding="{TemplateBinding Padding}">
+              <ContentPresenter HorizontalAlignment="Stretch"
+                                VerticalAlignment="Center"
+                                TextElement.Foreground="{TemplateBinding Foreground}"/>
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsHighlighted" Value="True">
+                <Setter TargetName="ItemBorder" Property="Background" Value="#D5BDF0"/>
+                <Setter Property="Foreground" Value="#120E17"/>
+              </Trigger>
+              <Trigger Property="IsSelected" Value="True">
+                <Setter TargetName="ItemBorder" Property="Background" Value="#7A3FC2"/>
+                <Setter Property="Foreground" Value="White"/>
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Opacity" Value="0.55"/>
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
     </Style>
 
     <Style TargetType="Label">
@@ -3362,11 +4538,14 @@ function Apply-CreatorProfileToTranslator {
         </Grid.ColumnDefinitions>
         <StackPanel VerticalAlignment="Center">
           <TextBlock Text="MOD TRANSLATION TOOLKIT" FontSize="20" FontWeight="Bold" Foreground="#D4B5F5"/>
-          <TextBlock Text="RimWorld profile • dark Mrokar theme" Foreground="#AFA2C0" FontSize="12"/>
+          <TextBlock Name="txtAppSubtitle" Text="RimWorld profile • dark Mrokar theme" Foreground="#AFA2C0" FontSize="12"/>
         </StackPanel>
-        <Border Grid.Column="1" Background="#2B2038" CornerRadius="5" Padding="10,5" VerticalAlignment="Center">
-          <TextBlock Text="v0.5.5" Foreground="#CDA8F2" FontWeight="SemiBold"/>
-        </Border>
+        <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+          <Button Name="btnApiSettings" Content="API / Tłumaczenie" Margin="0,0,8,0"/>
+          <Border Background="#2B2038" CornerRadius="5" Padding="10,5" VerticalAlignment="Center">
+            <TextBlock Text="v0.7.8" Foreground="#CDA8F2" FontWeight="SemiBold"/>
+          </Border>
+        </StackPanel>
       </Grid>
     </Border>
 
@@ -3394,9 +4573,15 @@ function Apply-CreatorProfileToTranslator {
           <Border Grid.Row="1" Background="#211A2B" BorderBrush="#4A385D" BorderThickness="1"
                   CornerRadius="6" Padding="10" Margin="0,0,0,10">
             <StackPanel>
-              <TextBlock Text="RimWorld Game — podstawa gry i dodatki" FontSize="18" FontWeight="SemiBold" Foreground="#CDA8F2"/>
-              <TextBlock Text="Wybierz Core albo dowolny z wykrytych dodatków. Każdy moduł może być skanowany osobno."
+              <TextBlock Name="txtRimWorldGameTitle" Text="RimWorld Game — podstawa gry i dodatki" FontSize="18" FontWeight="SemiBold" Foreground="#CDA8F2"/>
+              <TextBlock Name="txtRimWorldGameSubtitle" Text="Wybierz Core albo dowolny z wykrytych dodatków. Każdy moduł może być skanowany osobno."
                          Foreground="#B9AEC9" Margin="0,4,0,0" TextWrapping="Wrap"/>
+              <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                <TextBlock Name="lblRwGameSourceLang" Text="Źródło:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <ComboBox Name="cmbRwGameSourceLang" Width="220" Margin="0,0,14,0"/>
+                <TextBlock Name="lblRwGameTargetLang" Text="Cel:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <ComboBox Name="cmbRwGameTargetLang" Width="220"/>
+              </StackPanel>
             </StackPanel>
           </Border>
 
@@ -3406,7 +4591,7 @@ function Apply-CreatorProfileToTranslator {
               <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
             <StackPanel Grid.Column="0">
-              <TextBlock Text="Moduły / DLC:" FontWeight="SemiBold" Margin="0,0,0,4"/>
+              <TextBlock Name="txtModulesDlc" Text="Moduły / DLC:" FontWeight="SemiBold" Margin="0,0,0,4"/>
               <ListBox Name="lstRimWorldGameModules" Height="120" SelectionMode="Extended"/>
             </StackPanel>
             <StackPanel Grid.Column="1" Margin="10,20,0,0">
@@ -3423,16 +4608,26 @@ function Apply-CreatorProfileToTranslator {
               <DataGridTextColumn Header="Moduł" Binding="{Binding Module}" Width="110"/>
               <DataGridTextColumn Header="Typ" Binding="{Binding Type}" Width="160"/>
               <DataGridTextColumn Header="Klucz" Binding="{Binding Key}" Width="260"/>
-              <DataGridTextColumn Header="Angielski" Binding="{Binding Source}" Width="*"/>
-              <DataGridTextColumn Header="Polski" Binding="{Binding Translation}" Width="*"/>
+              <DataGridTextColumn Header="Źródło" Binding="{Binding Source}" Width="*"/>
+              <DataGridTextColumn Header="Tłumaczenie" Binding="{Binding Translation}" Width="*"/>
             </DataGrid.Columns>
           </DataGrid>
 
-          <StackPanel Grid.Row="4" Orientation="Horizontal" Margin="0,10,0,0">
-            <TextBlock Name="lblRimWorldGameCount" Text="Wpisy: 0" VerticalAlignment="Center" Margin="0,0,16,0"/>
-            <TextBlock Name="txtRimWorldGameStatus" Text="Wybierz folder gry albo użyj automatycznego wykrywania."
-                       Foreground="#B9AEC9" VerticalAlignment="Center"/>
-          </StackPanel>
+          <Grid Grid.Row="4" Margin="0,10,0,0">
+            <Grid.ColumnDefinitions>
+              <ColumnDefinition Width="*"/>
+              <ColumnDefinition Width="Auto"/>
+            </Grid.ColumnDefinitions>
+            <StackPanel Grid.Column="0" Orientation="Horizontal">
+              <TextBlock Name="lblRimWorldGameCount" Text="Wpisy: 0" VerticalAlignment="Center" Margin="0,0,16,0"/>
+              <TextBlock Name="txtRimWorldGameStatus" Text="Wybierz folder gry albo użyj automatycznego wykrywania."
+                         Foreground="#B9AEC9" VerticalAlignment="Center"/>
+            </StackPanel>
+            <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="12,0,0,0">
+              <Button Name="btnExportRimWorldGameCsv" Content="Eksport CSV" Margin="0,0,8,0"/>
+              <Button Name="btnImportRimWorldGameCsv" Content="Import CSV"/>
+            </StackPanel>
+          </Grid>
         </Grid>
       </TabItem>
           <TabItem Name="tabRimWorldMod" Header="RimWorld Mod">
@@ -3489,6 +4684,11 @@ function Apply-CreatorProfileToTranslator {
               <ComboBoxItem Content="한국어 🇰🇷" Tag="KR"/>
               <ComboBoxItem Content="中文 🇨🇳" Tag="CN"/>
               <ComboBoxItem Content="Português 🇵🇹" Tag="PT"/>
+              <ComboBoxItem Content="繁體中文 🇹🇼" Tag="TW"/>
+              <ComboBoxItem Content="Português (Brasil) 🇧🇷" Tag="BR"/>
+              <ComboBoxItem Content="Русский 🇷🇺" Tag="RU"/>
+              <ComboBoxItem Content="Svenska 🇸🇪" Tag="SE"/>
+              <ComboBoxItem Content="Nederlands 🇳🇱" Tag="NL"/>
             </ComboBox>
           </Grid>
 
@@ -3496,15 +4696,9 @@ function Apply-CreatorProfileToTranslator {
             <Button Name="btnExport" Content="Eksport CSV"/>
             <Button Name="btnImport" Content="Import CSV"/>
             <Label Name="lblSourceLang" Content="Z:" VerticalContentAlignment="Center"/>
-            <ComboBox Name="cmbSourceLang" Width="105" Height="30" Margin="0,0,8,0" SelectedIndex="0">
-              <ComboBoxItem Content="English" Tag="en"/>
-              <ComboBoxItem Content="Polski" Tag="pl"/>
-            </ComboBox>
+            <ComboBox Name="cmbSourceLang" Width="105" Height="30" Margin="0,0,8,0"/>
             <Label Name="lblTargetLang" Content="Na:" VerticalContentAlignment="Center"/>
-            <ComboBox Name="cmbTargetLang" Width="105" Height="30" Margin="0,0,8,0" SelectedIndex="1">
-              <ComboBoxItem Content="English" Tag="en"/>
-              <ComboBoxItem Content="Polski" Tag="pl"/>
-            </ComboBox>
+            <ComboBox Name="cmbTargetLang" Width="105" Height="30" Margin="0,0,8,0"/>
             <Button Name="btnAutoTranslate" Content="Tłumacz brakujące"/>
             <Button Name="btnValidate" Content="Sprawdź / napraw placeholdery"/>
             <Button Name="btnKeybindDiagnostics" Content="Diagnostyka skrótów"/>
@@ -3517,15 +4711,22 @@ function Apply-CreatorProfileToTranslator {
 
           <Border Grid.Row="3" Background="#19151F" BorderBrush="#40344F" BorderThickness="1"
                   CornerRadius="4" Padding="8" Margin="0,0,0,10">
-            <StackPanel Orientation="Horizontal">
-              <TextBlock Name="lblCoverageTitle" Text="Istniejące języki:" VerticalAlignment="Center"
-                         Foreground="#B9AEC9" Margin="0,0,10,0"/>
-              <TextBlock Name="txtCoveragePL" Text="Polski: -" VerticalAlignment="Center"
-                         Foreground="#D4B5F5" Margin="0,0,12,0"/>
-              <Button Name="btnLoadExistingPL" Content="Wczytaj ponownie PL" IsEnabled="False"/>
-              <TextBlock Name="txtCoverageEN" Text="English: -" VerticalAlignment="Center"
-                         Foreground="#D4B5F5" Margin="8,0,12,0"/>
-              <Button Name="btnLoadExistingEN" Content="Wczytaj ponownie EN" IsEnabled="False"/>
+            <StackPanel>
+              <StackPanel Orientation="Horizontal">
+                <TextBlock Name="lblCoverageTitle" Text="Istniejące języki:" VerticalAlignment="Center"
+                           Foreground="#B9AEC9" Margin="0,0,10,0"/>
+                <TextBlock Name="txtCoveragePL" Text="Polski: -" VerticalAlignment="Center"
+                           Foreground="#D4B5F5" Margin="0,0,12,0"/>
+                <Button Name="btnLoadExistingPL" Content="Wczytaj ponownie PL" IsEnabled="False"/>
+                <TextBlock Name="txtCoverageEN" Text="English: -" VerticalAlignment="Center"
+                           Foreground="#D4B5F5" Margin="8,0,12,0"/>
+                <Button Name="btnLoadExistingEN" Content="Wczytaj ponownie EN" IsEnabled="False"/>
+              </StackPanel>
+              <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
+                <TextBlock Name="lblCreatorId" Text="Creator ID:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <TextBox Name="txtCreatorId" Width="160" ToolTip="Stały identyfikator autora używany w packageId tłumaczeń."/>
+                <Button Name="btnSaveCreatorId" Content="Zapisz ID" Margin="8,0,0,0"/>
+              </StackPanel>
             </StackPanel>
           </Border>
 
@@ -3697,10 +4898,10 @@ function Apply-CreatorProfileToTranslator {
                 <ColumnDefinition Width="Auto"/>
               </Grid.ColumnDefinitions>
 
-              <TextBlock Grid.Column="0" Text="Nazwa kreatora:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+              <TextBlock Name="txtCreatorNameLabel" Grid.Column="0" Text="Nazwa kreatora:" VerticalAlignment="Center" Margin="0,0,6,0"/>
               <TextBox Grid.Column="1" Name="txtCreatorName" Margin="0,0,12,0"
                        ToolTip="Nazwa używana jako autor tłumaczeń."/>
-              <TextBlock Grid.Column="2" Text="SteamID / profil:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+              <TextBlock Name="txtSteamProfileLabel" Grid.Column="2" Text="SteamID / profil:" VerticalAlignment="Center" Margin="0,0,6,0"/>
               <TextBox Grid.Column="3" Name="txtSteamProfile" Margin="0,0,12,0"
                        ToolTip="Opcjonalny SteamID64 lub link do profilu Steam."/>
               <Button Grid.Column="4" Name="btnSaveCreatorProfile" Content="Zapisz profil"/>
@@ -3780,22 +4981,44 @@ $names = @(
   "btnRwGameCoreOnly",
   "btnRwGameDlcOnly",
   "btnScanRimWorldGame",
+  "btnExportRimWorldGameCsv",
+  "btnImportRimWorldGameCsv",
   "rimWorldGameGrid",
   "lblRimWorldGameCount",
-  "txtRimWorldGameStatus"
+  "txtRimWorldGameStatus",
+  "btnApiSettings",
+  "txtAppSubtitle",
+  "txtRimWorldGameTitle",
+  "txtRimWorldGameSubtitle",
+  "txtModulesDlc",
+  "txtCreatorNameLabel",
+  "txtSteamProfileLabel",
+  "lblRwGameSourceLang",
+  "cmbRwGameSourceLang",
+  "lblRwGameTargetLang",
+  "cmbRwGameTargetLang",
+  "lblCreatorId",
+  "txtCreatorId",
+  "btnSaveCreatorId"
 )
 foreach ($n in $names) { Set-Variable -Name $n -Value $window.FindName($n) }
+
+Load-WorkshopProfile
+Apply-CreatorProfileToTranslator
+Apply-CentralUiLanguage
+
 
 
 
 function Get-CoverageText([string]$code) {
+    $lang = Get-LanguageByCode $code
+    $name = if ($null -ne $lang) { [string]$lang.NativeName } else { $code }
+
     if (-not $script:LanguageCoverage.ContainsKey($code)) {
-        return if ($code -eq "pl") { "Polski: -" } else { "English: -" }
+        return "$name`: -"
     }
 
     $c = $script:LanguageCoverage[$code]
-    $name = if ($code -eq "pl") { "Polski" } else { "English" }
-
     $statusText = if ($script:UiLanguage -eq "en") {
         switch ($c.Status) {
             "none" { "none" }
@@ -3814,20 +5037,355 @@ function Get-CoverageText([string]$code) {
 
     return "$name`: $($c.Matched)/$($c.Total) ($($c.Percent)%) - $statusText"
 }
+if ($null -ne $txtCreatorId) { $txtCreatorId.Text = Get-ToolkitCreatorId }
+if ($null -ne $btnSaveCreatorId) {
+    $btnSaveCreatorId.Add_Click({
+        try {
+            $saved = Save-ToolkitCreatorId $txtCreatorId.Text
+            $txtCreatorId.Text = $saved
+            $msg = if ($script:UiLanguage -eq "en") { "Creator ID saved: $saved" } else { "Zapisano Creator ID: $saved" }
+            [System.Windows.MessageBox]::Show($msg,"Mod Translation Toolkit") | Out-Null
+        } catch {
+            [System.Windows.MessageBox]::Show($_.Exception.Message,"Mod Translation Toolkit") | Out-Null
+        }
+    })
+}
+
+Populate-LanguageCombo $cmbSourceLang "en"
+Populate-LanguageCombo $cmbTargetLang "pl"
+Select-PreviewFlagForTargetLanguage
+Populate-LanguageCombo $cmbRwGameSourceLang "en"
+Populate-LanguageCombo $cmbRwGameTargetLang "pl"
+
+$cmbSourceLang.Add_SelectionChanged({
+    if (-not [string]::IsNullOrWhiteSpace([string]$txtModPath.Text) -and (Test-ExistingFolderSafe $txtModPath.Text)) {
+        try {
+            $scan = Analyze-Mod $txtModPath.Text
+            Refresh-LanguageCoverageUi
+        } catch {}
+    }
+})
+
+$cmbTargetLang.Add_SelectionChanged({
+    if (-not [string]::IsNullOrWhiteSpace([string]$txtModPath.Text) -and (Test-ExistingFolderSafe $txtModPath.Text)) {
+        try {
+            Update-LanguageCoverage $txtModPath.Text
+            foreach ($e in $script:Entries) { $e.Translation = "" }
+            [void](AutoLoad-ExistingTargetTranslation)
+            Refresh-LanguageCoverageUi
+            Refresh-Grid
+        } catch {}
+    }
+
+    Select-PreviewFlagForTargetLanguage
+})
+
 
 function Refresh-LanguageCoverageUi {
-    $txtCoveragePL.Text = Get-CoverageText "pl"
-    $txtCoverageEN.Text = Get-CoverageText "en"
+    $src = Get-SelectedSourceLanguageCode
+    $dst = Get-SelectedTargetLanguageCode
 
-    $btnLoadExistingPL.IsEnabled = (
-        $script:ExistingTranslations.ContainsKey("pl") -and
-        $script:ExistingTranslations["pl"].Count -gt 0
-    )
+    $txtCoverageEN.Text = Get-CoverageText $src
+    $txtCoveragePL.Text = Get-CoverageText $dst
 
-    $btnLoadExistingEN.IsEnabled = (
-        $script:ExistingTranslations.ContainsKey("en") -and
-        $script:ExistingTranslations["en"].Count -gt 0
-    )
+    $btnLoadExistingEN.Content = if ($script:UiLanguage -eq "en") { "Load source localization" } else { "Wczytaj lokalizację źródłową" }
+    $btnLoadExistingPL.Content = if ($script:UiLanguage -eq "en") { "Load target translation" } else { "Wczytaj tłumaczenie docelowe" }
+
+    $btnLoadExistingEN.IsEnabled = ($script:ExistingTranslations.ContainsKey($src) -and $script:ExistingTranslations[$src].Count -gt 0)
+    $btnLoadExistingPL.IsEnabled = ($script:ExistingTranslations.ContainsKey($dst) -and $script:ExistingTranslations[$dst].Count -gt 0)
+}
+
+
+# ---------- Central UI localization ----------
+$script:UiText = @{
+    pl = @{
+        AppSubtitle = "RimWorld profile • dark Mrokar theme"
+        GameProfiles = "Profile gier"
+        Workshop = "Workshop"
+        RimWorldGame = "RimWorld Game"
+        RimWorldMod = "RimWorld Mod"
+        KenshiGame = "Kenshi Game"
+        Translation = "Tłumaczenie"
+        InstalledMods = "Zainstalowane mody"
+        DetectRimWorld = "Wykryj RimWorld"
+        ChooseGameFolder = "Wybierz folder gry"
+        OpenFolder = "Otwórz folder"
+        RimWorldGameTitle = "RimWorld Game — podstawa gry i dodatki"
+        RimWorldGameSubtitle = "Wybierz Core albo dowolny z wykrytych dodatków. Każdy moduł może być skanowany osobno."
+        RwGameSourceLabel = "Źródło:"
+        RwGameTargetLabel = "Cel:"
+        RwGameModuleHeader = "Moduł"
+        RwGameTypeHeader = "Typ"
+        RwGameKeyHeader = "Klucz"
+        RwGameSourceHeader = "Źródło"
+        RwGameTargetHeader = "Tłumaczenie"
+        RwGameDetectedModules = "Wykryto moduły: {0}."
+        RwGameScanInProgress = "Skanowanie RimWorld Game..."
+        RwGameSelectModule = "Zaznacz co najmniej jeden moduł / DLC."
+
+        ModulesDlc = "Moduły / DLC:"
+        SelectAll = "Zaznacz wszystko"
+        CoreOnly = "Tylko Core"
+        DlcOnly = "Tylko DLC"
+        ScanSelected = "Skanuj wybrane"
+        Entries = "Wpisy: 0"
+        ChooseGameOrDetect = "Wybierz folder gry albo użyj automatycznego wykrywania."
+        ChooseModFolder = "Wybierz folder moda"
+        ScanAgain = "Skanuj ponownie"
+        UpdateExistingTranslation = "Aktualizuj istniejące tłumaczenie"
+        OpenModFolder = "Otwórz folder moda"
+        Name = "Nazwa:"
+        TranslatorAuthor = "Autor tłumaczenia:"
+        PreviewFlag = "Preview + flaga"
+        ExportCsv = "Eksport CSV"
+        ImportCsv = "Import CSV"
+        From = "Z:"
+        To = "Na:"
+        TranslateMissing = "Tłumacz brakujące"
+        ValidatePlaceholders = "Sprawdź / napraw placeholdery"
+        KeybindDiagnostics = "Diagnostyka skrótów"
+        DllDiagnostics = "Diagnostyka DLL/UI"
+        BuildSeparateMod = "Zbuduj oddzielny mod"
+        CopyWorkshop = "Kopiuj opis Workshop"
+        ExistingLanguages = "Istniejące języki"
+        Search = "Szukaj:"
+        Clear = "Wyczyść"
+        NewText = "Nowy tekst:"
+        ReplaceAll = "Zamień wszędzie"
+        DetectSteamMods = "Wykryj Steam i mody"
+        ModsCount = "Mody: 0"
+        UseSelected = "Tłumacz / edytuj wybrany mod"
+        CreatorName = "Nazwa kreatora:"
+        SteamProfile = "SteamID / profil:"
+        SaveProfile = "Zapisz profil"
+        AddWorkshopItem = "Dodaj"
+        RefreshWorkshop = "Odśwież"
+        RemoveWorkshopItem = "Usuń"
+        OpenWorkshopItem = "Otwórz Workshop"
+        DetectKenshi = "Wykryj Kenshi"
+        ChooseKenshiFolder = "Wybierz folder Kenshi"
+        ScanKenshiBase = "Skanuj podstawę gry"
+        FcsHelp = "Jak wyeksportować dane z FCS?"
+        BuildKenshi = "Zapisz pliki tłumaczenia"
+        ApiSettings = "API / Tłumaczenie"
+        LanguageBoth = "Oba"
+        LanguageSource = "Oryginał"
+        LanguageTranslation = "Tłumaczenie"
+    }
+    en = @{
+        AppSubtitle = "RimWorld profile • dark Mrokar theme"
+        GameProfiles = "Game profiles"
+        Workshop = "Workshop"
+        RimWorldGame = "RimWorld Game"
+        RimWorldMod = "RimWorld Mod"
+        KenshiGame = "Kenshi Game"
+        Translation = "Translation"
+        InstalledMods = "Installed mods"
+        DetectRimWorld = "Detect RimWorld"
+        ChooseGameFolder = "Choose game folder"
+        OpenFolder = "Open folder"
+        RimWorldGameTitle = "RimWorld Game — base game and DLC"
+        RimWorldGameSubtitle = "Choose Core or any detected DLC. Each module can be scanned separately."
+        RwGameSourceLabel = "Source:"
+        RwGameTargetLabel = "Target:"
+        RwGameModuleHeader = "Module"
+        RwGameTypeHeader = "Type"
+        RwGameKeyHeader = "Key"
+        RwGameSourceHeader = "Source"
+        RwGameTargetHeader = "Translation"
+        RwGameDetectedModules = "Detected modules: {0}."
+        RwGameScanInProgress = "Scanning RimWorld Game..."
+        RwGameSelectModule = "Select at least one module / DLC."
+
+        ModulesDlc = "Modules / DLC:"
+        SelectAll = "Select all"
+        CoreOnly = "Core only"
+        DlcOnly = "DLC only"
+        ScanSelected = "Scan selected"
+        Entries = "Entries: 0"
+        ChooseGameOrDetect = "Choose the game folder or use automatic detection."
+        ChooseModFolder = "Choose mod folder"
+        ScanAgain = "Scan again"
+        UpdateExistingTranslation = "Update existing translation"
+        OpenModFolder = "Open mod folder"
+        Name = "Name:"
+        TranslatorAuthor = "Translation author:"
+        PreviewFlag = "Preview + flag"
+        ExportCsv = "Export CSV"
+        ImportCsv = "Import CSV"
+        From = "From:"
+        To = "To:"
+        TranslateMissing = "Translate missing"
+        ValidatePlaceholders = "Check / repair placeholders"
+        KeybindDiagnostics = "Keybind diagnostics"
+        DllDiagnostics = "DLL/UI diagnostics"
+        BuildSeparateMod = "Build separate mod"
+        CopyWorkshop = "Copy Workshop description"
+        ExistingLanguages = "Existing languages"
+        Search = "Search:"
+        Clear = "Clear"
+        NewText = "New text:"
+        ReplaceAll = "Replace all"
+        DetectSteamMods = "Detect Steam and mods"
+        ModsCount = "Mods: 0"
+        UseSelected = "Translate / edit selected mod"
+        CreatorName = "Creator name:"
+        SteamProfile = "SteamID / profile:"
+        SaveProfile = "Save profile"
+        AddWorkshopItem = "Add"
+        RefreshWorkshop = "Refresh"
+        RemoveWorkshopItem = "Remove"
+        OpenWorkshopItem = "Open Workshop"
+        DetectKenshi = "Detect Kenshi"
+        ChooseKenshiFolder = "Choose Kenshi folder"
+        ScanKenshiBase = "Scan base game"
+        FcsHelp = "How to export data from FCS?"
+        BuildKenshi = "Save translation files"
+        ApiSettings = "Translation API"
+        LanguageBoth = "Both"
+        LanguageSource = "Source"
+        LanguageTranslation = "Translation"
+    }
+}
+
+function T([string]$key) {
+    $lang = if ($script:UiLanguage -eq "en") { "en" } else { "pl" }
+    if ($script:UiText[$lang].ContainsKey($key)) {
+        return [string]$script:UiText[$lang][$key]
+    }
+    return $key
+}
+
+function Set-ControlContentIfExists($control, [string]$key) {
+    if ($null -eq $control) { return }
+
+    $value = T $key
+
+    # TabItem.Content is the actual tab body. Replacing it with localized text
+    # destroys the nested UI. Tabs must localize Header only.
+    if ($control -is [System.Windows.Controls.TabItem]) {
+        $control.Header = $value
+        return
+    }
+
+    if ($control.PSObject.Properties.Name -contains "Content") {
+        $control.Content = $value
+    }
+}
+
+function Set-ControlTextIfExists($control, [string]$key) {
+    if ($null -ne $control) { $control.Text = T $key }
+}
+
+function Apply-CentralUiLanguage {
+    # Tabs
+    Set-ControlContentIfExists $tabGameProfiles "GameProfiles"
+    Set-ControlContentIfExists $tabWorkshop "Workshop"
+    Set-ControlContentIfExists $tabRimWorldGame "RimWorldGame"
+    Set-ControlContentIfExists $tabRimWorldMod "RimWorldMod"
+    Set-ControlContentIfExists $tabKenshi "KenshiGame"
+    Set-ControlContentIfExists $tabTranslation "Translation"
+    Set-ControlContentIfExists $tabInstalledMods "InstalledMods"
+
+    if ($null -ne $txtAppSubtitle) { $txtAppSubtitle.Text = T "AppSubtitle" }
+    if ($null -ne $txtRimWorldGameTitle) { $txtRimWorldGameTitle.Text = T "RimWorldGameTitle" }
+    if ($null -ne $txtRimWorldGameSubtitle) { $txtRimWorldGameSubtitle.Text = T "RimWorldGameSubtitle" }
+    if ($null -ne $txtModulesDlc) { $txtModulesDlc.Text = T "ModulesDlc" }
+    if ($null -ne $txtCreatorNameLabel) { $txtCreatorNameLabel.Text = T "CreatorName" }
+    if ($null -ne $txtSteamProfileLabel) { $txtSteamProfileLabel.Text = T "SteamProfile" }
+
+    if ($null -ne $lblRwGameSourceLang) { $lblRwGameSourceLang.Text = T "RwGameSourceLabel" }
+    if ($null -ne $lblRwGameTargetLang) { $lblRwGameTargetLang.Text = T "RwGameTargetLabel" }
+
+    # RimWorld Game
+    if ($null -ne $rimWorldGameGrid -and $rimWorldGameGrid.Columns.Count -ge 5) {
+        $rimWorldGameGrid.Columns[0].Header = T "RwGameModuleHeader"
+        $rimWorldGameGrid.Columns[1].Header = T "RwGameTypeHeader"
+        $rimWorldGameGrid.Columns[2].Header = T "RwGameKeyHeader"
+
+        $srcLang = Get-RimWorldGameSelectedSourceLanguage
+        $dstLang = Get-RimWorldGameSelectedTargetLanguage
+        $rimWorldGameGrid.Columns[3].Header = if ($null -ne $srcLang) { [string]$srcLang.NativeName } else { T "RwGameSourceHeader" }
+        $rimWorldGameGrid.Columns[4].Header = if ($null -ne $dstLang) { [string]$dstLang.NativeName } else { T "RwGameTargetHeader" }
+    }
+
+    Set-ControlContentIfExists $btnDetectRimWorldGame "DetectRimWorld"
+    Set-ControlContentIfExists $btnChooseRimWorldGame "ChooseGameFolder"
+    Set-ControlContentIfExists $btnOpenRimWorldGameFolder "OpenFolder"
+    Set-ControlContentIfExists $btnRwGameSelectAll "SelectAll"
+    Set-ControlContentIfExists $btnRwGameCoreOnly "CoreOnly"
+    Set-ControlContentIfExists $btnRwGameDlcOnly "DlcOnly"
+    Set-ControlContentIfExists $btnScanRimWorldGame "ScanSelected"
+    Set-ControlContentIfExists $btnExportRimWorldGameCsv "ExportCsv"
+    Set-ControlContentIfExists $btnImportRimWorldGameCsv "ImportCsv"
+
+    # RimWorld Mod
+    Set-ControlContentIfExists $btnChooseMod "ChooseModFolder"
+    Set-ControlContentIfExists $btnAnalyze "ScanAgain"
+    Set-ControlContentIfExists $btnUpdateExisting "UpdateExistingTranslation"
+    Set-ControlContentIfExists $btnOpenCurrentFolder "OpenModFolder"
+    Set-ControlContentIfExists $chkPreviewFlag "PreviewFlag"
+    Set-ControlContentIfExists $btnExport "ExportCsv"
+    Set-ControlContentIfExists $btnImport "ImportCsv"
+    Set-ControlContentIfExists $btnAutoTranslate "TranslateMissing"
+    Set-ControlContentIfExists $btnValidate "ValidatePlaceholders"
+    Set-ControlContentIfExists $btnKeybindDiagnostics "KeybindDiagnostics"
+    Set-ControlContentIfExists $btnAssemblyDiagnostics "DllDiagnostics"
+    Set-ControlContentIfExists $btnBuild "BuildSeparateMod"
+    Set-ControlContentIfExists $btnCopyWorkshop "CopyWorkshop"
+    Set-ControlContentIfExists $btnClearSearch "Clear"
+    Set-ControlContentIfExists $btnReplaceAll "ReplaceAll"
+    Set-ControlContentIfExists $btnDetect "DetectSteamMods"
+    Set-ControlContentIfExists $btnUseSelected "UseSelected"
+    Set-ControlContentIfExists $btnOpenFolder "OpenFolder"
+
+    # Workshop
+    Set-ControlContentIfExists $btnSaveCreatorProfile "SaveProfile"
+    Set-ControlContentIfExists $btnAddWorkshopItem "AddWorkshopItem"
+    Set-ControlContentIfExists $btnRefreshWorkshop "RefreshWorkshop"
+    Set-ControlContentIfExists $btnRemoveWorkshopItem "RemoveWorkshopItem"
+    Set-ControlContentIfExists $btnOpenWorkshopItem "OpenWorkshopItem"
+
+    # Kenshi
+    Set-ControlContentIfExists $btnDetectKenshi "DetectKenshi"
+    Set-ControlContentIfExists $btnChooseKenshi "ChooseKenshiFolder"
+    Set-ControlContentIfExists $btnOpenKenshiFolder "OpenFolder"
+    Set-ControlContentIfExists $btnScanKenshi "ScanKenshiBase"
+    Set-ControlContentIfExists $btnTranslateKenshi "TranslateMissing"
+    Set-ControlContentIfExists $btnExportKenshiCsv "ExportCsv"
+    Set-ControlContentIfExists $btnImportKenshiCsv "ImportCsv"
+    Set-ControlContentIfExists $btnFcsHelpKenshi "FcsHelp"
+    Set-ControlContentIfExists $btnBuildKenshi "BuildKenshi"
+
+    # API
+    Set-ControlContentIfExists $btnApiSettings "ApiSettings"
+
+    # Search scope combo items
+    if ($null -ne $cmbSearchScope -and $cmbSearchScope.Items.Count -ge 3) {
+        $cmbSearchScope.Items[0].Content = T "LanguageBoth"
+        $cmbSearchScope.Items[1].Content = T "LanguageSource"
+        $cmbSearchScope.Items[2].Content = T "LanguageTranslation"
+    }
+
+    # Labels found by name
+    if ($null -ne $lblSourceLang) { $lblSourceLang.Content = T "From" }
+    if ($null -ne $lblTargetLang) { $lblTargetLang.Content = T "To" }
+    if ($null -ne $lblSearchTitle) { $lblSearchTitle.Content = T "Search" }
+    if ($null -ne $lblReplaceTitle) { $lblReplaceTitle.Content = T "NewText" }
+
+    # Static named status/count labels
+    if ($null -ne $lblMods -and ([string]$lblMods.Content -match '^(Mody|Mods): 0$')) {
+        $lblMods.Content = T "ModsCount"
+    }
+    if ($null -ne $lblRimWorldGameCount -and ([string]$lblRimWorldGameCount.Text -match '^(Wpisy|Entries): 0$')) {
+        $lblRimWorldGameCount.Text = T "Entries"
+    }
+    if ($null -ne $txtRimWorldGameStatus -and ([string]$txtRimWorldGameStatus.Text -match 'Wybierz folder gry|Choose the game folder')) {
+        $txtRimWorldGameStatus.Text = T "ChooseGameOrDetect"
+    }
+
+    if ($null -ne $lblCreatorId) { $lblCreatorId.Text = "Creator ID:" }
+    if ($null -ne $btnSaveCreatorId) { $btnSaveCreatorId.Content = if ($script:UiLanguage -eq "en") { "Save ID" } else { "Zapisz ID" } }
 }
 
 function Apply-UiLanguage {
@@ -3901,6 +5459,7 @@ function Apply-UiLanguage {
     $window.FindName("lblSourceLang").Content = "From:"
     $window.FindName("lblTargetLang").Content = "To:"
     $window.FindName("btnAutoTranslate").Content = "Translate missing"
+    $btnApiSettings.Content = "Translation API"
     $window.FindName("btnValidate").Content = "Check / repair placeholders"
     $window.FindName("btnBuild").Content = "Build separate translation mod"
     $btnCopyWorkshop.Content = "Copy Workshop description"
@@ -3930,6 +5489,8 @@ function Apply-UiLanguage {
         $modsGrid.Columns[4].Header = "Source"
         $modsGrid.Columns[5].Header = "Folder"
     }
+
+    Apply-CentralUiLanguage
 }
 
 Apply-UiLanguage
@@ -4172,16 +5733,17 @@ $btnKeybindDiagnostics.Add_Click({
 })
 
 $btnChooseMod.Add_Click({
-    $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
-    $dlg.Description = "Wybierz główny folder moda RimWorld"
-    if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-        $txtModPath.Text = $dlg.SelectedPath
+    $picked = Show-ModernFolderPicker `
+        $(if ($script:UiLanguage -eq "en") { "Choose the main RimWorld mod folder" } else { "Wybierz główny folder moda RimWorld" }) `
+        $txtModPath.Text
+    if ($picked) {
+        $txtModPath.Text = $picked
             Reset-TranslationUpdateMode
             $script:EditingTranslationModPath = ""
             $script:EditingTranslationPackageId = ""
             $script:EditingTranslationName = ""
         try {
-            $scan = Analyze-Mod $dlg.SelectedPath
+            $scan = Analyze-Mod $picked
             $txtStatus.Text = "Znaleziono $($scan.Total) unikalnych wpisów. Automatycznie podstawiono istniejących wpisów: $($scan.AutoLoadedExisting). Wersja zawartości: $($scan.ContentVersion)."
             Refresh-LanguageCoverageUi
         } catch { [System.Windows.MessageBox]::Show($_.Exception.Message, "Błąd") }
@@ -4234,11 +5796,10 @@ $btnDetectKenshi.Add_Click({
 })
 
 $btnChooseKenshi.Add_Click({
-    $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
-    $dlg.Description = "Wybierz główny folder Kenshi"
-    if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-        $txtKenshiPath.Text = $dlg.SelectedPath
-    }
+    $picked = Show-ModernFolderPicker `
+        $(if ($script:UiLanguage -eq "en") { "Choose the main Kenshi folder" } else { "Wybierz główny folder Kenshi" }) `
+        $txtKenshiPath.Text
+    if ($picked) { $txtKenshiPath.Text = $picked }
 })
 
 $btnOpenKenshiFolder.Add_Click({
@@ -4272,11 +5833,15 @@ $btnTranslateKenshi.Add_Click({
         return
     }
 
+    if (-not (Require-TranslationProvider)) { return }
+
     $missing = @($script:KenshiEntries | Where-Object { [string]::IsNullOrWhiteSpace($_.Translation) })
     $done = 0
     foreach ($e in $missing) {
         try {
-            $e.Translation = Translate-Google ([string]$e.Source) "en" "pl"
+            # Kenshi workflow is intentionally still English -> Polish in v0.7.1.
+            # It will move to the shared dynamic language selectors in a later Kenshi migration.
+            $e.Translation = Translate-Configured ([string]$e.Source) "en" "pl"
             $done++
             if (($done % 20) -eq 0) {
                 Refresh-KenshiGrid
@@ -4395,7 +5960,7 @@ $btnExport.Add_Click({
     $dlg = New-Object Microsoft.Win32.SaveFileDialog
     $dlg.Filter = "CSV (*.csv)|*.csv"
     $dlg.FileName = "translation_pl.csv"
-    if ($dlg.ShowDialog()) { Export-Csv $dlg.FileName; $txtStatus.Text = "CSV zapisany: $($dlg.FileName)" }
+    if ($dlg.ShowDialog()) { Export-ToolkitCsv $dlg.FileName; $txtStatus.Text = "CSV zapisany: $($dlg.FileName)" }
 })
 
 $btnImport.Add_Click({
@@ -4403,7 +5968,7 @@ $btnImport.Add_Click({
     $dlg = New-Object Microsoft.Win32.OpenFileDialog
     $dlg.Filter = "CSV (*.csv)|*.csv"
     if ($dlg.ShowDialog()) {
-        try { Import-Csv $dlg.FileName; $txtStatus.Text = "Zaimportowano CSV." }
+        try { Import-ToolkitCsv $dlg.FileName; $txtStatus.Text = "Zaimportowano CSV." }
         catch { [System.Windows.MessageBox]::Show($_.Exception.Message, "Błąd") }
     }
 })
@@ -4461,8 +6026,12 @@ $btnValidate.Add_Click({
     }
 })
 
+$btnApiSettings.Add_Click({ Show-TranslationApiSettingsWindow })
+
 $btnAutoTranslate.Add_Click({
     if ($script:Entries.Count -eq 0) { return }
+
+    if (-not (Require-TranslationProvider)) { return }
 
     $srcItem = $cmbSourceLang.SelectedItem
     $dstItem = $cmbTargetLang.SelectedItem
@@ -4471,6 +6040,9 @@ $btnAutoTranslate.Add_Click({
     $src = [string]$srcItem.Tag
     $dst = [string]$dstItem.Tag
 
+    $pair = Require-TranslationLanguagePair $src $dst
+    if ($null -eq $pair) { return }
+
     if ($src -eq $dst) {
         $msg = if ($script:UiLanguage -eq "en") { "Source and target language must be different." } else { "Język źródłowy i docelowy muszą być różne." }
         [System.Windows.MessageBox]::Show($msg, "Mod Translation Toolkit")
@@ -4478,9 +6050,9 @@ $btnAutoTranslate.Add_Click({
     }
 
     $question = if ($script:UiLanguage -eq "en") {
-        "Automatic translation uses an online Google Translate endpoint and may be rate-limited. Review machine-translated text manually.`n`nTranslate all empty entries?"
+        "Automatic translation uses the provider configured in API Settings. Provider costs/limits may apply. Review machine-translated text manually.`n`nTranslate all empty entries?"
     } else {
-        "Automatyczne tłumaczenie używa internetowego endpointu Google Translate i może mieć limity. Wynik warto przejrzeć ręcznie.`n`nTłumaczyć wszystkie puste wpisy?"
+        "Automatyczne tłumaczenie używa dostawcy wybranego w Ustawieniach API. Mogą obowiązywać jego koszty i limity. Wynik warto przejrzeć ręcznie.`n`nTłumaczyć wszystkie puste wpisy?"
     }
 
     $answer = [System.Windows.MessageBox]::Show(
@@ -4496,7 +6068,7 @@ $btnAutoTranslate.Add_Click({
     $failed = 0
 
     foreach ($e in $todo) {
-        try { $e.Translation = Translate-Google $e.Source $src $dst } catch { $failed++ }
+        try { $e.Translation = Translate-Configured $e.Source $src $dst } catch { $failed++ }
         $done++
 
         if (($done % 5) -eq 0 -or $done -eq $total) {
@@ -4632,16 +6204,17 @@ $btnBuild.Add_Click({
         return
     }
 
-    $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
-    $dlg.Description = if ($script:UiLanguage -eq "en") {
-        "Choose the folder where the separate translation mod should be created"
-    } else {
-        "Wybierz folder, w którym ma powstać oddzielny mod tłumaczeniowy"
-    }
+    $pickedOutput = Show-ModernFolderPicker `
+        $(if ($script:UiLanguage -eq "en") {
+            "Choose the folder where the separate translation mod should be created"
+        } else {
+            "Wybierz folder, w którym ma powstać oddzielny mod tłumaczeniowy"
+        }) `
+        ""
 
-    if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
+    if ($pickedOutput) {
         try {
-            $out = Build-TranslationMod $dlg.SelectedPath
+            $out = Build-TranslationMod $pickedOutput
             $script:LastWorkshopDescriptionPath = Join-Path $out "SteamWorkshopDescription.txt"
             $btnCopyWorkshop.IsEnabled = $true
             $txtStatus.Text = if ($script:UiLanguage -eq "en") {
@@ -4656,6 +6229,24 @@ $btnBuild.Add_Click({
     }
 })
 
+
+
+function Get-RimWorldGameSelectedSourceLanguage {
+    return Get-SelectedLanguageFromCombo $cmbRwGameSourceLang
+}
+function Get-RimWorldGameSelectedTargetLanguage {
+    return Get-SelectedLanguageFromCombo $cmbRwGameTargetLang
+}
+function Get-RimWorldGameSelectedSourceCode {
+    $l = Get-RimWorldGameSelectedSourceLanguage
+    if ($null -eq $l) { return "en" }
+    return [string]$l.Code
+}
+function Get-RimWorldGameSelectedTargetCode {
+    $l = Get-RimWorldGameSelectedTargetLanguage
+    if ($null -eq $l) { return "pl" }
+    return [string]$l.Code
+}
 
 function Get-RimWorldGamePathAuto {
     foreach ($loc in @(Find-RimWorldLocations)) {
@@ -4697,20 +6288,47 @@ function Load-RimWorldGameModules([string]$gamePath) {
         [void]$lstRimWorldGameModules.Items.Add($item)
         if ($m.IsCore) { $item.IsSelected = $true }
     }
-    Set-ControlTextSafe $txtRimWorldGameStatus "Wykryto moduły: $($lstRimWorldGameModules.Items.Count)."
+    $msg = (T "RwGameDetectedModules").Replace("{0}", [string]$lstRimWorldGameModules.Items.Count)
+    Set-ControlTextSafe $txtRimWorldGameStatus $msg
 }
 
 
 
 function Get-RimWorldLanguageAliases([string]$languageCodeOrName) {
-    $wanted = $languageCodeOrName.ToLowerInvariant()
-    if ($wanted -eq "polish") {
-        return @("polish","polski","pl")
+    if ([string]::IsNullOrWhiteSpace($languageCodeOrName)) { return @() }
+
+    $wanted = $languageCodeOrName.Trim()
+    $lang = Get-LanguageByCode $wanted
+    if ($null -eq $lang) {
+        $lang = $script:Languages | Where-Object {
+            $_.Name -ieq $wanted -or
+            $_.NativeName -ieq $wanted -or
+            $_.RimWorldFolder -ieq $wanted
+        } | Select-Object -First 1
     }
-    if ($wanted -eq "english") {
-        return @("english","en")
+
+    if ($null -eq $lang) { return @($wanted.ToLowerInvariant()) }
+
+    $aliases = New-Object System.Collections.ArrayList
+    $seen = @{}
+    foreach ($v in @($lang.Code, $lang.Name, $lang.NativeName, $lang.RimWorldFolder)) {
+        if ([string]::IsNullOrWhiteSpace([string]$v)) { continue }
+        $n = ([string]$v).Trim().ToLowerInvariant()
+        if (-not $seen.ContainsKey($n)) {
+            $seen[$n] = $true
+            [void]$aliases.Add($n)
+        }
     }
-    return @($wanted)
+
+    # Common RimWorld / ISO variants.
+    switch ([string]$lang.Code) {
+        "pt-br" { foreach ($v in @("brazilian","brazilian portuguese","portuguese brazil","pt_br","pt-br")) { if (-not $seen.ContainsKey($v)) { $seen[$v]=$true; [void]$aliases.Add($v) } } }
+        "zh-cn" { foreach ($v in @("chinesesimplified","simplified chinese","zh_cn","zh-cn")) { if (-not $seen.ContainsKey($v)) { $seen[$v]=$true; [void]$aliases.Add($v) } } }
+        "zh-tw" { foreach ($v in @("chinesetraditional","traditional chinese","zh_tw","zh-tw")) { if (-not $seen.ContainsKey($v)) { $seen[$v]=$true; [void]$aliases.Add($v) } } }
+        "cs" { foreach ($v in @("czech","čeština","cz")) { if (-not $seen.ContainsKey($v)) { $seen[$v]=$true; [void]$aliases.Add($v) } } }
+    }
+
+    return @($aliases)
 }
 
 function Test-RimWorldLanguageNameMatch([string]$name, [string]$languageCodeOrName) {
@@ -4763,13 +6381,19 @@ function Expand-RimWorldLanguageArchive([string]$archivePath) {
 
     if (-not (Test-Path -LiteralPath $target)) {
         New-Item -ItemType Directory -Path $target -Force | Out-Null
+        $asciiArchive = Join-Path $target "_language.tar"
 
         try {
-            & $tar.Source -xf $archivePath -C $target 2>&1 | Out-Null
-            if ($LASTEXITCODE -ne 0) {
-                throw "tar.exe zakończył pracę z kodem $LASTEXITCODE."
+            Copy-Item -LiteralPath $archivePath -Destination $asciiArchive -Force
+            & $tar.Source -xf $asciiArchive -C $target 2>&1 | Out-Null
+            $exitCode = $LASTEXITCODE
+            Remove-Item -LiteralPath $asciiArchive -Force -ErrorAction SilentlyContinue
+
+            if ($exitCode -ne 0) {
+                throw "tar.exe zakończył pracę z kodem $exitCode."
             }
         } catch {
+            Remove-Item -LiteralPath $asciiArchive -Force -ErrorAction SilentlyContinue
             Remove-Item -LiteralPath $target -Recurse -Force -ErrorAction SilentlyContinue
             throw "Nie udało się rozpakować archiwum językowego:`n$archivePath`n`n$($_.Exception.Message)"
         }
@@ -4837,7 +6461,7 @@ function Get-RimWorldLanguageFolder([string]$modulePath, [string]$languageCodeOr
     return $null
 }
 
-function Read-RimWorldKeyedXml([string]$filePath, [string]$moduleName, [string]$languageName) {
+function Read-RimWorldKeyedXml([string]$filePath, [string]$moduleName, [string]$role) {
     $rows = New-Object System.Collections.ArrayList
     try {
         [xml]$xml = Get-Content -LiteralPath $filePath -Raw -Encoding UTF8
@@ -4845,21 +6469,22 @@ function Read-RimWorldKeyedXml([string]$filePath, [string]$moduleName, [string]$
 
         foreach ($node in $xml.LanguageData.ChildNodes) {
             if ($node.NodeType -ne [System.Xml.XmlNodeType]::Element) { continue }
+            $value = [string]$node.InnerText
 
             [void]$rows.Add([pscustomobject]@{
                 Module = $moduleName
                 Type = "Keyed"
                 File = $filePath
                 Key = [string]$node.Name
-                Source = $(if ($languageName -eq "English") { [string]$node.InnerText } else { "" })
-                Translation = $(if ($languageName -eq "Polish") { [string]$node.InnerText } else { "" })
+                Source = $(if ($role -eq "Source") { $value } else { "" })
+                Translation = $(if ($role -eq "Target") { $value } else { "" })
             })
         }
     } catch {}
     return @($rows)
 }
 
-function Read-RimWorldDefInjectedXml([string]$filePath, [string]$moduleName, [string]$languageName, [string]$langRoot) {
+function Read-RimWorldDefInjectedXml([string]$filePath, [string]$moduleName, [string]$role, [string]$langRoot) {
     $rows = New-Object System.Collections.ArrayList
     try {
         [xml]$xml = Get-Content -LiteralPath $filePath -Raw -Encoding UTF8
@@ -4872,28 +6497,29 @@ function Read-RimWorldDefInjectedXml([string]$filePath, [string]$moduleName, [st
 
         foreach ($node in $xml.LanguageData.ChildNodes) {
             if ($node.NodeType -ne [System.Xml.XmlNodeType]::Element) { continue }
+            $value = [string]$node.InnerText
 
             [void]$rows.Add([pscustomobject]@{
                 Module = $moduleName
                 Type = $(if ([string]::IsNullOrWhiteSpace($defType)) { "DefInjected" } else { "DefInjected/$defType" })
                 File = $filePath
                 Key = [string]$node.Name
-                Source = $(if ($languageName -eq "English") { [string]$node.InnerText } else { "" })
-                Translation = $(if ($languageName -eq "Polish") { [string]$node.InnerText } else { "" })
+                Source = $(if ($role -eq "Source") { $value } else { "" })
+                Translation = $(if ($role -eq "Target") { $value } else { "" })
             })
         }
     } catch {}
     return @($rows)
 }
 
-function Get-RimWorldLanguageEntries([string]$langRoot, [string]$moduleName, [string]$languageName) {
+function Get-RimWorldLanguageEntries([string]$langRoot, [string]$moduleName, [string]$role) {
     $rows = New-Object System.Collections.ArrayList
     if ([string]::IsNullOrWhiteSpace($langRoot) -or -not (Test-Path $langRoot)) { return @() }
 
     $keyed = Join-Path $langRoot "Keyed"
     if (Test-Path $keyed) {
         foreach ($f in Get-ChildItem -LiteralPath $keyed -Filter *.xml -File -Recurse -ErrorAction SilentlyContinue) {
-            foreach ($r in @(Read-RimWorldKeyedXml $f.FullName $moduleName $languageName)) {
+            foreach ($r in @(Read-RimWorldKeyedXml $f.FullName $moduleName $role)) {
                 [void]$rows.Add($r)
             }
         }
@@ -4902,7 +6528,7 @@ function Get-RimWorldLanguageEntries([string]$langRoot, [string]$moduleName, [st
     $defInjected = Join-Path $langRoot "DefInjected"
     if (Test-Path $defInjected) {
         foreach ($f in Get-ChildItem -LiteralPath $defInjected -Filter *.xml -File -Recurse -ErrorAction SilentlyContinue) {
-            foreach ($r in @(Read-RimWorldDefInjectedXml $f.FullName $moduleName $languageName $langRoot)) {
+            foreach ($r in @(Read-RimWorldDefInjectedXml $f.FullName $moduleName $role $langRoot)) {
                 [void]$rows.Add($r)
             }
         }
@@ -4911,69 +6537,304 @@ function Get-RimWorldLanguageEntries([string]$langRoot, [string]$moduleName, [st
     return @($rows)
 }
 
+
+function Get-RimWorldGameDefSourceEntries([string]$modulePath, [string]$moduleName) {
+    $rows = New-Object System.Collections.ArrayList
+    $defsRoot = Join-Path $modulePath "Defs"
+    if (-not (Test-Path -LiteralPath $defsRoot)) { return @() }
+
+    # Mirrors the currently supported DefInjected fields used by the mod workflow.
+    # These are the common user-facing fields present across Core and DLC Defs.
+    $fields = @(
+        "label","description","jobString","reportString","gerund",
+        "labelShort","labelNoun","labelPlural","labelMale","labelFemale",
+        "inspectString","baseDesc","letterLabel","letterText"
+    )
+
+    $seen = @{}
+
+    foreach ($f in Get-ChildItem -LiteralPath $defsRoot -Recurse -Filter *.xml -File -ErrorAction SilentlyContinue) {
+        try {
+            [xml]$doc = Get-Content -LiteralPath $f.FullName -Raw -Encoding UTF8
+            if ($null -eq $doc.DocumentElement -or $doc.DocumentElement.Name -ne "Defs") { continue }
+
+            foreach ($def in $doc.DocumentElement.ChildNodes) {
+                if ($def.NodeType -ne [System.Xml.XmlNodeType]::Element) { continue }
+
+                $defNameNode = $def.SelectSingleNode("defName")
+                if ($null -eq $defNameNode -or [string]::IsNullOrWhiteSpace([string]$defNameNode.InnerText)) {
+                    continue
+                }
+
+                $defType = [string]$def.Name
+                $defName = ([string]$defNameNode.InnerText).Trim()
+
+                foreach ($field in $fields) {
+                    $node = $def.SelectSingleNode($field)
+                    if ($null -eq $node -or [string]::IsNullOrWhiteSpace([string]$node.InnerText)) {
+                        continue
+                    }
+
+                    $key = "$defName.$field"
+                    $id = "$moduleName|DefInjected/$defType|$key".ToLowerInvariant()
+                    if ($seen.ContainsKey($id)) { continue }
+                    $seen[$id] = $true
+
+                    [void]$rows.Add([pscustomobject]@{
+                        Module = $moduleName
+                        Type = "DefInjected/$defType"
+                        File = $f.FullName
+                        Key = $key
+                        Source = ([string]$node.InnerText).TrimEnd()
+                        Translation = ""
+                    })
+                }
+            }
+        } catch {}
+    }
+
+    return @($rows)
+}
+
+function Merge-RimWorldGameSourceEntries($primary, $secondary) {
+    $result = New-Object System.Collections.ArrayList
+    $seen = @{}
+
+    foreach ($entry in @($primary) + @($secondary)) {
+        if ($null -eq $entry) { continue }
+        $id = Get-RimWorldEntryIdentity $entry
+        $norm = $id.ToLowerInvariant()
+        if ($seen.ContainsKey($norm)) { continue }
+        $seen[$norm] = $true
+        [void]$result.Add($entry)
+    }
+
+    return @($result)
+}
+
 function Get-RimWorldEntryIdentity($entry) {
     return "$($entry.Module)|$($entry.Type)|$($entry.Key)"
+}
+
+
+function Export-RimWorldGameCsv([string]$path) {
+    $rows = @($rimWorldGameGrid.ItemsSource)
+    if ($rows.Count -eq 0) {
+        $msg = if ($script:UiLanguage -eq "en") {
+            "There are no RimWorld Game entries to export. Scan Core or DLC first."
+        } else {
+            "Brak wpisów RimWorld Game do eksportu. Najpierw zeskanuj Core lub DLC."
+        }
+        [System.Windows.MessageBox]::Show($msg, "RimWorld Game CSV") | Out-Null
+        return $false
+    }
+
+    $sourceLang = Get-RimWorldGameSelectedSourceLanguage
+    $targetLang = Get-RimWorldGameSelectedTargetLanguage
+    $sourceCode = if ($null -ne $sourceLang) { [string]$sourceLang.Code } else { "" }
+    $targetCode = if ($null -ne $targetLang) { [string]$targetLang.Code } else { "" }
+
+    $rows |
+        Select-Object Module,Type,File,Key,Source,Translation,
+            @{N="SourceLanguage";E={$sourceCode}},
+            @{N="TargetLanguage";E={$targetCode}} |
+        Microsoft.PowerShell.Utility\Export-Csv -LiteralPath $path -NoTypeInformation -Encoding UTF8 -Delimiter ';'
+
+    return $true
+}
+
+function Import-RimWorldGameCsv([string]$path) {
+    $rows = @(Microsoft.PowerShell.Utility\Import-Csv -LiteralPath $path -Encoding UTF8 -Delimiter ';')
+    if ($rows.Count -eq 0) {
+        throw $(if ($script:UiLanguage -eq "en") { "The CSV file contains no entries." } else { "Plik CSV nie zawiera wpisów." })
+    }
+
+    $required = @("Module","Type","Key","Translation")
+    foreach ($name in $required) {
+        if (-not ($rows[0].PSObject.Properties.Name -contains $name)) {
+            throw $(if ($script:UiLanguage -eq "en") {
+                "This is not a RimWorld Game CSV file. Missing column: $name"
+            } else {
+                "To nie jest plik CSV RimWorld Game. Brak kolumny: $name"
+            })
+        }
+    }
+
+    $current = @($rimWorldGameGrid.ItemsSource)
+    if ($current.Count -eq 0) {
+        throw $(if ($script:UiLanguage -eq "en") {
+            "Scan the same RimWorld Core/DLC selection before importing the CSV."
+        } else {
+            "Przed importem CSV zeskanuj ten sam zestaw Core/DLC w RimWorld Game."
+        })
+    }
+
+    $sourceLang = Get-RimWorldGameSelectedSourceLanguage
+    $targetLang = Get-RimWorldGameSelectedTargetLanguage
+    $currentSource = if ($null -ne $sourceLang) { [string]$sourceLang.Code } else { "" }
+    $currentTarget = if ($null -ne $targetLang) { [string]$targetLang.Code } else { "" }
+
+    $meta = $rows[0]
+    if (($meta.PSObject.Properties.Name -contains "SourceLanguage") -and
+        ($meta.PSObject.Properties.Name -contains "TargetLanguage")) {
+
+        $csvSource = [string]$meta.SourceLanguage
+        $csvTarget = [string]$meta.TargetLanguage
+
+        if ((-not [string]::IsNullOrWhiteSpace($csvSource) -and $csvSource -ine $currentSource) -or
+            (-not [string]::IsNullOrWhiteSpace($csvTarget) -and $csvTarget -ine $currentTarget)) {
+
+            $msg = if ($script:UiLanguage -eq "en") {
+                "CSV language pair: $csvSource → $csvTarget`nCurrent selection: $currentSource → $currentTarget`n`nThe file will still be imported. Verify that this is intentional."
+            } else {
+                "Para językowa CSV: $csvSource → $csvTarget`nAktualny wybór: $currentSource → $currentTarget`n`nPlik zostanie mimo to zaimportowany. Sprawdź, czy to zamierzone."
+            }
+            [System.Windows.MessageBox]::Show($msg, "RimWorld Game CSV") | Out-Null
+        }
+    }
+
+    $lookup = @{}
+    foreach ($r in $rows) {
+        $id = "$([string]$r.Module)|$([string]$r.Type)|$([string]$r.Key)".ToLowerInvariant()
+        $lookup[$id] = [string]$r.Translation
+    }
+
+    $updated = 0
+    foreach ($entry in $current) {
+        $id = (Get-RimWorldEntryIdentity $entry).ToLowerInvariant()
+        if ($lookup.ContainsKey($id)) {
+            $entry.Translation = [string]$lookup[$id]
+            $updated++
+        }
+    }
+
+    $rimWorldGameGrid.ItemsSource = $null
+    $rimWorldGameGrid.ItemsSource = @($current)
+    $rimWorldGameGrid.Items.Refresh()
+
+    return $updated
 }
 
 function Scan-RimWorldGameSelection {
     $selected = @($lstRimWorldGameModules.SelectedItems)
     if ($selected.Count -eq 0) {
-        [System.Windows.MessageBox]::Show("Zaznacz co najmniej jeden moduł / DLC.","RimWorld Game") | Out-Null
+        $msg = if ($script:UiLanguage -eq "en") { "Select at least one module / DLC." } else { "Zaznacz co najmniej jeden moduł / DLC." }
+        [System.Windows.MessageBox]::Show($msg,"RimWorld Game") | Out-Null
         return
     }
 
+    $sourceLang = Get-RimWorldGameSelectedSourceLanguage
+    $targetLang = Get-RimWorldGameSelectedTargetLanguage
+    if ($null -eq $sourceLang -or $null -eq $targetLang) { return }
+
+    if ($sourceLang.Code -ieq $targetLang.Code) {
+        $msg = if ($script:UiLanguage -eq "en") {
+            "Source and target language must be different."
+        } else {
+            "Język źródłowy i docelowy muszą być różne."
+        }
+        [System.Windows.MessageBox]::Show($msg,"RimWorld Game") | Out-Null
+        return
+    }
+
+    $rimWorldGameGrid.ItemsSource = $null
+    Set-ControlTextSafe $lblRimWorldGameCount (T "Entries")
+    $txtRimWorldGameStatus.ToolTip = $null
+
     $result = New-Object System.Collections.ArrayList
     $statusLines = New-Object System.Collections.ArrayList
-    $totalEnglish = 0
-    $totalPolish = 0
+
+    $totalSource = 0
+    $totalTarget = 0
     $matched = 0
+    $totalKeyed = 0
+    $totalDefInjected = 0
 
     foreach ($item in $selected) {
         $moduleName = [string]$item.Content
         $modulePath = [string]$item.Tag
 
-        $englishRoot = Get-RimWorldLanguageFolder $modulePath "english"
-        $polishRoot  = Get-RimWorldLanguageFolder $modulePath "polish"
+        $sourceRoot = Get-RimWorldLanguageFolder $modulePath ([string]$sourceLang.Code)
+        $targetRoot = Get-RimWorldLanguageFolder $modulePath ([string]$targetLang.Code)
 
-        $englishEntries = @(Get-RimWorldLanguageEntries $englishRoot $moduleName "English")
-        $polishEntries  = @(Get-RimWorldLanguageEntries $polishRoot  $moduleName "Polish")
+        $sourceLanguageEntries = @(Get-RimWorldLanguageEntries $sourceRoot $moduleName "Source")
 
-        $totalEnglish += $englishEntries.Count
-        $totalPolish += $polishEntries.Count
+        if ($sourceLang.Code -ieq "en") {
+            # English is special in RimWorld. Core/DLC DefInjected source is often
+            # represented only by Defs, not by a complete English DefInjected mirror.
+            $sourceKeyed = @($sourceLanguageEntries | Where-Object { $_.Type -eq "Keyed" })
+            $defSource = @(Get-RimWorldGameDefSourceEntries $modulePath $moduleName)
+            $explicitDefInjected = @($sourceLanguageEntries | Where-Object { $_.Type -like "DefInjected*" })
+            $sourceEntries = @(Merge-RimWorldGameSourceEntries (@($sourceKeyed) + @($defSource)) $explicitDefInjected)
+        } else {
+            # Non-English source must remain the selected official localization.
+            # Do not silently mix English Defs into it.
+            $sourceEntries = @($sourceLanguageEntries)
+        }
 
-        $polishMap = @{}
-        foreach ($p in $polishEntries) {
-            $polishMap[(Get-RimWorldEntryIdentity $p)] = [string]$p.Translation
+        $targetEntries = @(Get-RimWorldLanguageEntries $targetRoot $moduleName "Target")
+
+        $totalSource += $sourceEntries.Count
+        $totalTarget += $targetEntries.Count
+
+        $moduleKeyed = @($sourceEntries | Where-Object { $_.Type -eq "Keyed" }).Count
+        $moduleDefInjected = @($sourceEntries | Where-Object { $_.Type -like "DefInjected*" }).Count
+        $totalKeyed += $moduleKeyed
+        $totalDefInjected += $moduleDefInjected
+
+        $targetMap = @{}
+        foreach ($entry in $targetEntries) {
+            $targetMap[(Get-RimWorldEntryIdentity $entry).ToLowerInvariant()] = [string]$entry.Translation
         }
 
         $moduleMatched = 0
-        foreach ($e in $englishEntries) {
-            $id = Get-RimWorldEntryIdentity $e
-            if ($polishMap.ContainsKey($id)) {
-                $e.Translation = [string]$polishMap[$id]
+        foreach ($entry in $sourceEntries) {
+            $id = (Get-RimWorldEntryIdentity $entry).ToLowerInvariant()
+            if ($targetMap.ContainsKey($id)) {
+                $entry.Translation = [string]$targetMap[$id]
                 $moduleMatched++
                 $matched++
             }
-            [void]$result.Add($e)
+            [void]$result.Add($entry)
         }
 
-        $polishState = if ($polishRoot) {
-            "PL znaleziony: $moduleMatched/$($englishEntries.Count)"
+        $targetState = if ($targetRoot) {
+            "$($targetLang.NativeName): $moduleMatched/$($sourceEntries.Count)"
         } else {
-            "PL NIE znaleziony"
+            if ($script:UiLanguage -eq "en") { "$($targetLang.Name): not found" } else { "$($targetLang.NativeName): nie znaleziono" }
         }
 
-        $plSource = if ($polishRoot) { $polishRoot } else { "(brak)" }
-        [void]$statusLines.Add("$moduleName — EN: $($englishEntries.Count), $polishState`r`nŹródło PL: $plSource")
+        $sourcePathText = if ($sourceRoot) { $sourceRoot } else { "(brak / missing)" }
+        $targetPathText = if ($targetRoot) { $targetRoot } else { "(brak / missing)" }
+
+        [void]$statusLines.Add(
+            "$moduleName | Keyed: $moduleKeyed | DefInjected: $moduleDefInjected | $targetState`r`nSource: $sourcePathText`r`nTarget: $targetPathText"
+        )
     }
 
     $rimWorldGameGrid.ItemsSource = $null
     $rimWorldGameGrid.ItemsSource = @($result)
 
-    Set-ControlTextSafe $lblRimWorldGameCount "Wpisy: $($result.Count) | PL: $matched"
-    Set-ControlTextSafe $txtRimWorldGameStatus "Skan zakończony. EN: $totalEnglish, PL znalezione: $totalPolish, dopasowane: $matched."
+    if ($rimWorldGameGrid.Columns.Count -ge 5) {
+        $rimWorldGameGrid.Columns[3].Header = [string]$sourceLang.NativeName
+        $rimWorldGameGrid.Columns[4].Header = [string]$targetLang.NativeName
+    }
 
-    $details = ($statusLines -join "`r`n")
+    $countText = if ($script:UiLanguage -eq "en") {
+        "Entries: $($result.Count) | Keyed: $totalKeyed | DefInjected: $totalDefInjected | matched $($targetLang.Name): $matched"
+    } else {
+        "Wpisy: $($result.Count) | Keyed: $totalKeyed | DefInjected: $totalDefInjected | dopasowane $($targetLang.NativeName): $matched"
+    }
+    Set-ControlTextSafe $lblRimWorldGameCount $countText
+
+    $status = if ($script:UiLanguage -eq "en") {
+        "Scan complete. Source $($sourceLang.Name): $totalSource, target entries found: $totalTarget, matched: $matched."
+    } else {
+        "Skan zakończony. Źródło $($sourceLang.NativeName): $totalSource, wpisy docelowe: $totalTarget, dopasowane: $matched."
+    }
+    Set-ControlTextSafe $txtRimWorldGameStatus $status
+
+    $details = ($statusLines -join "`r`n`r`n")
     if (-not [string]::IsNullOrWhiteSpace($details)) {
         $txtRimWorldGameStatus.ToolTip = $details
     }
@@ -4990,11 +6851,12 @@ $btnDetectRimWorldGame.Add_Click({
 })
 
 $btnChooseRimWorldGame.Add_Click({
-    $dlg = New-Object System.Windows.Forms.FolderBrowserDialog
-    $dlg.Description = "Wybierz główny folder RimWorld"
-    if ($dlg.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {
-        $txtRimWorldGamePath.Text = $dlg.SelectedPath
-        Load-RimWorldGameModules $dlg.SelectedPath
+    $picked = Show-ModernFolderPicker `
+        $(if ($script:UiLanguage -eq "en") { "Choose the main RimWorld game folder" } else { "Wybierz główny folder RimWorld" }) `
+        $txtRimWorldGamePath.Text
+    if ($picked) {
+        $txtRimWorldGamePath.Text = $picked
+        Load-RimWorldGameModules $picked
     }
 })
 
@@ -5019,6 +6881,20 @@ $txtRimWorldGamePath.Add_Drop({
     }
 })
 
+
+$cmbRwGameSourceLang.Add_SelectionChanged({
+    if ($rimWorldGameGrid.Columns.Count -ge 5 -and $null -ne $cmbRwGameSourceLang.SelectedItem) {
+        $l = Get-RimWorldGameSelectedSourceLanguage
+        if ($null -ne $l) { $rimWorldGameGrid.Columns[3].Header = [string]$l.NativeName }
+    }
+})
+$cmbRwGameTargetLang.Add_SelectionChanged({
+    if ($rimWorldGameGrid.Columns.Count -ge 5 -and $null -ne $cmbRwGameTargetLang.SelectedItem) {
+        $l = Get-RimWorldGameSelectedTargetLanguage
+        if ($null -ne $l) { $rimWorldGameGrid.Columns[4].Header = [string]$l.NativeName }
+    }
+})
+
 $btnRwGameSelectAll.Add_Click({
     $lstRimWorldGameModules.SelectAll()
 })
@@ -5037,7 +6913,7 @@ $btnRwGameDlcOnly.Add_Click({
 $btnScanRimWorldGame.Add_Click({
     try {
         $btnScanRimWorldGame.IsEnabled = $false
-        Set-ControlTextSafe $txtRimWorldGameStatus "Skanowanie RimWorld Game..."
+        Set-ControlTextSafe $txtRimWorldGameStatus (T "RwGameScanInProgress")
         [System.Windows.Forms.Application]::DoEvents()
 
         Scan-RimWorldGameSelection
@@ -5048,6 +6924,9 @@ $btnScanRimWorldGame.Add_Click({
             "Skan RimWorld Game nie powiódł się.`n`n$($_.Exception.Message)"
         }
 
+        $rimWorldGameGrid.ItemsSource = $null
+        Set-ControlTextSafe $lblRimWorldGameCount (T "Entries")
+        $txtRimWorldGameStatus.ToolTip = $null
         Set-ControlTextSafe $txtRimWorldGameStatus $msg
         [System.Windows.MessageBox]::Show(
             $msg,
@@ -5059,6 +6938,54 @@ $btnScanRimWorldGame.Add_Click({
         $btnScanRimWorldGame.IsEnabled = $true
     }
 })
+
+$btnExportRimWorldGameCsv.Add_Click({
+    $dlg = New-Object Microsoft.Win32.SaveFileDialog
+    $dlg.Filter = "CSV (*.csv)|*.csv"
+    $dlg.DefaultExt = ".csv"
+    $dlg.AddExtension = $true
+
+    $sourceLang = Get-RimWorldGameSelectedSourceLanguage
+    $targetLang = Get-RimWorldGameSelectedTargetLanguage
+    $src = if ($null -ne $sourceLang) { [string]$sourceLang.Code } else { "source" }
+    $dst = if ($null -ne $targetLang) { [string]$targetLang.Code } else { "target" }
+    $dlg.FileName = "RimWorld-Game-$src-$dst.csv"
+
+    if ($dlg.ShowDialog() -eq $true) {
+        try {
+            if (Export-RimWorldGameCsv $dlg.FileName) {
+                $msg = if ($script:UiLanguage -eq "en") {
+                    "RimWorld Game CSV exported: $($dlg.FileName)"
+                } else {
+                    "Wyeksportowano CSV RimWorld Game: $($dlg.FileName)"
+                }
+                Set-ControlTextSafe $txtRimWorldGameStatus $msg
+            }
+        } catch {
+            [System.Windows.MessageBox]::Show($_.Exception.Message, "RimWorld Game CSV") | Out-Null
+        }
+    }
+})
+
+$btnImportRimWorldGameCsv.Add_Click({
+    $dlg = New-Object Microsoft.Win32.OpenFileDialog
+    $dlg.Filter = "CSV (*.csv)|*.csv"
+
+    if ($dlg.ShowDialog() -eq $true) {
+        try {
+            $updated = Import-RimWorldGameCsv $dlg.FileName
+            $msg = if ($script:UiLanguage -eq "en") {
+                "Imported translations for $updated RimWorld Game entries."
+            } else {
+                "Zaimportowano tłumaczenia dla $updated wpisów RimWorld Game."
+            }
+            Set-ControlTextSafe $txtRimWorldGameStatus $msg
+        } catch {
+            [System.Windows.MessageBox]::Show($_.Exception.Message, "RimWorld Game CSV") | Out-Null
+        }
+    }
+})
+
 
 $btnDetect.Add_Click({
     try {
@@ -5124,4 +7051,12 @@ $btnOpenFolder.Add_Click({
 })
 
 try { Scan-InstalledMods } catch {}
+
+try {
+    $multiIssues = @(Test-MultilingualConfiguration)
+    if ($multiIssues.Count -gt 0 -and $null -ne $txtStatus) {
+        $txtStatus.ToolTip = "Multilingual configuration warnings:`r`n" + ($multiIssues -join "`r`n")
+    }
+} catch {}
+
 $window.ShowDialog() | Out-Null

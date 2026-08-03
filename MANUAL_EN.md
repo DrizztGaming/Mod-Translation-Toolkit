@@ -94,3 +94,80 @@ Since v0.5.2 the Toolkit no longer assumes a fixed `Languages\Polish` folder. It
 
 ### Official RimWorld language archives
 RimWorld stores many official translations as `.tar` files, for example `Polish (Polski).tar`. Since v0.5.3 the Toolkit detects these archives, extracts them only to a temporary cache under `%TEMP%`, and reads `Keyed` and `DefInjected` from them. Original game files are never modified.
+
+
+### RimWorld Game — DefInjected
+Since v0.5.6 English DefInjected source entries for Core/DLC are derived directly from `Defs`. RimWorld does not need to ship a complete English `Languages/English/DefInjected` mirror, which is why the previous scanner mostly exposed Keyed entries. The Toolkit matches generated `defName.field` keys against the official target-language localization.
+
+## Your own Google Cloud Translation API key
+Automatic translation now requires your own API key.
+
+1. Open Google Cloud Console.
+2. Create or select a project.
+3. Enable **Cloud Translation API**.
+4. Add billing if Google requires it for the project.
+5. Go to **APIs & Services → Credentials**.
+6. Choose **Create credentials → API key**.
+7. In the Toolkit click **API Settings** and paste the key.
+8. Restricting the key to Cloud Translation API is recommended.
+
+The key is stored under `%APPDATA%\ModTranslationToolkit` encrypted with Windows DPAPI for the current user account.
+
+**API costs and quotas belong to the key owner.** The Toolkit does not provide a shared key and does not send the key to the Toolkit author.
+
+## Automatic translation providers
+Open **Translation API** and choose:
+
+### Google Cloud Translation
+Requires a Google Cloud Translation API key and usually configured billing.
+
+### DeepL API
+Requires a DeepL API authentication key. API Free and API Pro endpoints are supported. DeepL API Free may request payment details for abuse prevention.
+
+### LibreTranslate
+Use a managed service with a key or your own self-hosted server. The default self-hosted endpoint is `http://localhost:5000`; the API key can be left empty when the server does not require one.
+
+Credentials are stored locally and encrypted with Windows DPAPI.
+
+
+## Interface language
+Since v0.5.9 Polish/English UI text is managed through a central Toolkit dictionary. This also covers the newer RimWorld Game, Workshop, Kenshi Game and API settings sections. ComboBox dropdowns use a dedicated high-contrast item style.
+
+
+## Folder selection
+Since v0.6.0 the Toolkit uses one modernized Windows folder picker across RimWorld Game, RimWorld mods, Kenshi, translation output and existing-translation updates. Update dialogs still support paste and drag-and-drop, and now also include a **Browse...** button.
+
+
+## Language layer
+Since v0.6.1 the Toolkit has a central language registry. Source and target language lists are no longer hardcoded to English/Polish. Each language stores a Toolkit code, RimWorld folder name and Google/DeepL/LibreTranslate mapping. This is the first stage of full multilingual support.
+
+
+## RimWorld Mod with arbitrary languages
+Since v0.6.2 the **RimWorld Mod** profile uses the selected source and target language. The Toolkit scans the matching localization folder, detects existing translations, automatically loads the selected target language and writes output to the correct `Languages/<Language>` path. English source still supplements entries from `Defs`; non-English sources are not silently mixed with English Def text.
+
+
+## RimWorld Game: source and target language
+Since v0.6.3 the **RimWorld Game** tab has independent source and target language selectors. Core/DLC scanning uses the central language registry and supports both loose `Languages` folders and official `.tar` archives.
+
+For English source the Toolkit generates missing DefInjected source from `Defs`, as before. For non-English sources, only the selected official localization is used so English text is not silently mixed into another language.
+
+
+## API language support validation
+Since v0.6.4 the Toolkit validates the selected language pair before automatic translation starts.
+
+- **Google Cloud** uses the central Toolkit language mappings.
+- **DeepL** queries the API for the current source and target language lists. The Toolkit handles variants such as `EN-US`, `PT-BR`, `PT-PT` and Chinese script variants when exposed by the API.
+- **LibreTranslate** queries `/languages` on the configured server and checks whether that specific server provides the requested pair.
+
+The **Translation API** window now includes **Check languages**. Unsupported pairs are blocked before translation begins.
+
+
+## Multilingual completion
+Since v0.7.0 the mod name, `packageId`, Workshop description, build report and Preview flag follow the target language.
+
+### Creator ID
+The new persistent **Creator ID** is used in package IDs:
+
+`<original.packageId>.<creatorId>.<language>`
+
+CSV exports include `SourceLanguage` and `TargetLanguage`.

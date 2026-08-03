@@ -94,3 +94,80 @@ Od v0.5.2 Toolkit nie zakłada już sztywno folderu `Languages\Polish`. Najpierw
 
 ### Oficjalne archiwa językowe RimWorlda
 RimWorld przechowuje wiele oficjalnych tłumaczeń jako pliki `.tar`, np. `Polish (Polski).tar`. Od v0.5.3 Toolkit wykrywa takie archiwa, rozpakowuje je wyłącznie do tymczasowego cache w `%TEMP%` i odczytuje z nich `Keyed` oraz `DefInjected`. Oryginalne pliki gry nie są modyfikowane.
+
+
+### RimWorld Game — DefInjected
+Od v0.5.6 angielskie wpisy DefInjected dla Core/DLC są budowane bezpośrednio z `Defs`. RimWorld nie musi przechowywać kompletnej angielskiej kopii `Languages/English/DefInjected`, dlatego wcześniejszy skaner widział głównie Keyed. Toolkit dopasowuje wygenerowane klucze `defName.field` do oficjalnego tłumaczenia docelowego.
+
+## Własny klucz Google Cloud Translation API
+Automatyczne tłumaczenie wymaga teraz własnego klucza API.
+
+1. Otwórz Google Cloud Console.
+2. Utwórz lub wybierz projekt.
+3. Włącz **Cloud Translation API**.
+4. Dodaj rozliczenia, jeśli Google wymaga ich dla projektu.
+5. Przejdź do **APIs & Services → Credentials**.
+6. Wybierz **Create credentials → API key**.
+7. W Toolkicie kliknij **Ustawienia API** i wklej klucz.
+8. Zalecane jest ograniczenie klucza wyłącznie do Cloud Translation API.
+
+Klucz jest zapisywany w `%APPDATA%\ModTranslationToolkit` w postaci zaszyfrowanej przez Windows DPAPI dla bieżącego konta użytkownika.
+
+**Koszty i limity API należą do właściciela klucza.** Toolkit nie dostarcza wspólnego klucza i nie wysyła klucza do autora Toolkita.
+
+## Dostawcy automatycznego tłumaczenia
+W **API / Tłumaczenie** można wybrać:
+
+### Google Cloud Translation
+Wymaga klucza Google Cloud Translation API i zwykle skonfigurowanego billingu.
+
+### DeepL API
+Wymaga klucza DeepL API. Dostępne są endpointy API Free i API Pro. DeepL API Free może wymagać danych płatniczych do zapobiegania nadużyciom.
+
+### LibreTranslate
+Można użyć publicznej usługi z kluczem albo własnego serwera. Dla self-hosted domyślny endpoint to `http://localhost:5000`, a klucz API może być pusty, jeśli serwer go nie wymaga.
+
+Klucze są przechowywane lokalnie i szyfrowane przez Windows DPAPI.
+
+
+## Język interfejsu
+Od v0.5.9 teksty interfejsu PL/EN są zarządzane przez centralny słownik Toolkita. Dotyczy to również nowych sekcji RimWorld Game, Workshop, Kenshi Game i ustawień API. Rozwijane listy ComboBox mają własny styl o podwyższonym kontraście.
+
+
+## Wybieranie folderów
+Od v0.6.0 Toolkit korzysta ze wspólnego, unowocześnionego okna wyboru folderów Windows. Dotyczy ono RimWorld Game, modów RimWorld, Kenshi, folderu docelowego dla tłumaczenia oraz aktualizacji istniejących tłumaczeń. W oknach aktualizacji nadal można wkleić ścieżkę albo przeciągnąć folder, a dodatkowo dostępny jest przycisk **Przeglądaj...**.
+
+
+## Warstwa języków
+Od v0.6.1 Toolkit posiada centralny rejestr języków. Lista języka źródłowego i docelowego nie jest już wpisana na sztywno jako English/Polski. Każdy język ma własny kod Toolkita, nazwę folderu RimWorld oraz mapowanie na Google, DeepL i LibreTranslate. To pierwszy etap pełnej wielojęzyczności.
+
+
+## RimWorld Mod i dowolny język
+Od v0.6.2 profil **RimWorld Mod** korzysta z wybranego języka źródłowego i docelowego. Toolkit skanuje odpowiedni folder lokalizacji, wykrywa istniejące tłumaczenia, automatycznie wczytuje wybrany język docelowy i zapisuje wynik do poprawnego `Languages/<Language>`. Dla English nadal uzupełnia źródła z `Defs`; dla innych języków nie miesza automatycznie angielskich Defów.
+
+
+## RimWorld Game: język źródłowy i docelowy
+Od v0.6.3 zakładka **RimWorld Game** ma własny wybór języka źródłowego i docelowego. Skan Core/DLC korzysta z centralnego rejestru języków i obsługuje zarówno rozpakowane foldery `Languages`, jak i oficjalne archiwa `.tar`.
+
+Dla źródła English Toolkit generuje brakujące DefInjected z `Defs`, tak jak wcześniej. Dla innych języków źródłem jest wyłącznie wybrana oficjalna lokalizacja, dzięki czemu angielskie teksty nie są mieszane z tłumaczeniem.
+
+
+## Sprawdzanie obsługi języków przez API
+Od v0.6.4 Toolkit sprawdza wybraną parę językową przed uruchomieniem automatycznego tłumaczenia.
+
+- **Google Cloud** korzysta z centralnego mapowania kodów języków.
+- **DeepL** pobiera aktualną listę języków źródłowych i docelowych z API. Toolkit rozróżnia m.in. warianty `EN-US`, `PT-BR`, `PT-PT` i chińskie warianty skryptu, jeśli są zwracane przez API.
+- **LibreTranslate** pobiera `/languages` z wybranego serwera i sprawdza, czy konkretny serwer oferuje daną parę.
+
+W **API / Tłumaczenie** dostępny jest przycisk **Sprawdź języki**, który weryfikuje bieżącą konfigurację dostawcy. Nieobsługiwana para jest blokowana przed rozpoczęciem tłumaczenia.
+
+
+## Domknięcie wielojęzyczności
+Od v0.7.0 nazwa moda, `packageId`, opis Workshop, raport buildu i flaga Preview uwzględniają język docelowy.
+
+### Creator ID
+Nowe pole **Creator ID** jest zapisywane lokalnie. `packageId` ma format:
+
+`<oryginalny.packageId>.<creatorId>.<język>`
+
+Eksport CSV zawiera `SourceLanguage` i `TargetLanguage`.
