@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.8.0 - 2026-08-03
+
+### Project Zomboid experimental foundation
+- Added a new `Project Zomboid Mod` profile.
+- Detects standard `media/lua/shared/Translate/<LANG>` translation folders.
+- Supports common Build 41 layouts and Build 42 versioned mod folders such as `42/` and `42.x/`.
+- Can scan a direct mod folder or a Workshop item containing `mods/<mod-name>/...`.
+- Added multilingual source/target selectors for common Project Zomboid language codes.
+- Loads existing target translations and shows matched entries in the translation grid.
+- Added manual editing, automatic translation, CSV export and CSV import.
+- CSV matching uses root + file + key.
+- v0.8.0 intentionally handles only standard `key = "value"` translation tables.
+- Structured formats such as `Recorded_Media_*` are intentionally skipped until a dedicated parser is added.
+- Translation-mod packaging for Project Zomboid is not enabled yet.
+
 ## 0.7.8 - 2026-08-03
 
 ### LibreTranslate UTF-8 fix

@@ -2,8 +2,8 @@
 
 A Windows desktop helper for translating game mods.
 
-> **Current stable release:** v0.7.8  
-> **Supported profiles:** RimWorld Game, RimWorld Mod, Kenshi Game
+> **Current stable release:** v0.8.0  
+> **Supported profiles:** RimWorld Game, RimWorld Mod, Kenshi Game, Project Zomboid Mod (experimental)
 
 The project started as a small RimWorld translation helper and is being prepared as a multi-game toolkit with separate game profiles.
 
@@ -174,3 +174,9 @@ v0.7.6 adds guarded repair for common mojibake in LibreTranslate responses, such
 
 ## LibreTranslate UTF-8 handling
 v0.7.8 reads LibreTranslate HTTP responses as raw bytes and decodes them explicitly as UTF-8 before JSON parsing. This avoids Windows PowerShell 5.1 legacy-codepage corruption of translated text.
+
+
+## Project Zomboid Mod
+v0.8.0 introduces an experimental Project Zomboid mod profile. It scans standard `media/lua/shared/Translate/<LANG>` tables, recognizes common B41 layouts and B42 versioned mod folders, matches existing target translations, and supports manual editing, automatic translation and CSV workflows.
+
+The first implementation intentionally skips structured translation formats such as `Recorded_Media_*` and does not build a Project Zomboid translation package yet.

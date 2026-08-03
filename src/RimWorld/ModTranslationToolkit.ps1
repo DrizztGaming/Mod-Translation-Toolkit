@@ -7,7 +7,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-$AppVersion = "0.7.8"
+$AppVersion = "0.8.0"
 $script:UiLanguage = "pl"
 $script:Entries = New-Object System.Collections.ArrayList
 $script:Mods = New-Object System.Collections.ArrayList
@@ -1111,6 +1111,308 @@ function Populate-LanguageCombo($combo, [string]$selectedCode) {
 function Get-SelectedLanguageFromCombo($combo) {
     if ($null -eq $combo -or $null -eq $combo.SelectedItem) { return $null }
     return Get-LanguageByCode ([string]$combo.SelectedItem.Tag)
+}
+
+
+# ---------- Project Zomboid experimental profile ----------
+$script:PzEntries = @()
+$script:PzContentRoots = @()
+
+function Get-PzLanguageCode([string]$code) {
+    switch ($code.ToLowerInvariant()) {
+        "en" { return "EN" }
+        "pl" { return "PL" }
+        "de" { return "DE" }
+        "fr" { return "FR" }
+        "es" { return "ES" }
+        "it" { return "IT" }
+        "pt" { return "PT" }
+        "pt-br" { return "PTBR" }
+        "cs" { return "CZ" }
+        "uk" { return "UA" }
+        "ru" { return "RU" }
+        "ja" { return "JP" }
+        "ko" { return "KO" }
+        "zh-cn" { return "CN" }
+        "zh-tw" { return "CH" }
+        "nl" { return "NL" }
+        default { return $null }
+    }
+}
+
+function Populate-PzLanguageCombo($combo, [string]$selectedCode) {
+    if ($null -eq $combo) { return }
+    $combo.Items.Clear()
+
+    foreach ($lang in $script:Languages) {
+        $pzCode = Get-PzLanguageCode ([string]$lang.Code)
+        if ([string]::IsNullOrWhiteSpace($pzCode)) { continue }
+
+        $item = New-Object System.Windows.Controls.ComboBoxItem
+        $item.Content = Get-LanguageDisplayName $lang
+        $item.Tag = [string]$lang.Code
+        [void]$combo.Items.Add($item)
+
+        if ($lang.Code -ieq $selectedCode) {
+            $combo.SelectedItem = $item
+        }
+    }
+
+    if ($null -eq $combo.SelectedItem -and $combo.Items.Count -gt 0) {
+        $combo.SelectedIndex = 0
+    }
+}
+
+function Get-PzSelectedLanguage($combo) {
+    if ($null -eq $combo -or $null -eq $combo.SelectedItem) { return $null }
+    return Get-LanguageByCode ([string]$combo.SelectedItem.Tag)
+}
+
+function Test-PzTranslateRoot([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) { return $false }
+    return Test-Path -LiteralPath (Join-Path $path "media\lua\shared\Translate")
+}
+
+function Get-PzVersionSortValue([string]$name) {
+    try {
+        if ($name -match '^\d+(\.\d+){0,3}$') {
+            return [version]$name
+        }
+    } catch {}
+    return [version]"0.0"
+}
+
+function Find-PzModContentRoots([string]$selectedPath) {
+    if ([string]::IsNullOrWhiteSpace($selectedPath) -or -not (Test-Path -LiteralPath $selectedPath)) {
+        return @()
+    }
+
+    $found = New-Object System.Collections.ArrayList
+    $seen = @{}
+
+    function Add-PzRoot([string]$candidate, [string]$label) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) { return }
+        try { $candidate = [System.IO.Path]::GetFullPath($candidate) } catch {}
+        if (-not (Test-PzTranslateRoot $candidate)) { return }
+        $key = $candidate.ToLowerInvariant()
+        if ($seen.ContainsKey($key)) { return }
+        $seen[$key] = $true
+        [void]$found.Add([pscustomobject]@{
+            Path = $candidate
+            Label = $label
+        })
+    }
+
+    Add-PzRoot $selectedPath "root"
+
+    # Build 42 versioned mod layout, e.g. 42/, 42.21/.
+    $versionDirs = @(
+        Get-ChildItem -LiteralPath $selectedPath -Directory -ErrorAction SilentlyContinue |
+        Where-Object { $_.Name -match '^\d+(\.\d+){0,3}$' } |
+        Sort-Object @{ Expression = { Get-PzVersionSortValue $_.Name }; Descending = $true }
+    )
+    foreach ($d in $versionDirs) {
+        Add-PzRoot $d.FullName $d.Name
+    }
+
+    # Workshop items commonly contain mods/<mod-name>/...
+    $modsRoot = Join-Path $selectedPath "mods"
+    if (Test-Path -LiteralPath $modsRoot) {
+        foreach ($modDir in Get-ChildItem -LiteralPath $modsRoot -Directory -ErrorAction SilentlyContinue) {
+            Add-PzRoot $modDir.FullName $modDir.Name
+
+            $nestedVersions = @(
+                Get-ChildItem -LiteralPath $modDir.FullName -Directory -ErrorAction SilentlyContinue |
+                Where-Object { $_.Name -match '^\d+(\.\d+){0,3}$' } |
+                Sort-Object @{ Expression = { Get-PzVersionSortValue $_.Name }; Descending = $true }
+            )
+            foreach ($v in $nestedVersions) {
+                Add-PzRoot $v.FullName "$($modDir.Name)/$($v.Name)"
+            }
+        }
+    }
+
+    # If the user selected one level above the actual mod folder, check direct children.
+    foreach ($d in Get-ChildItem -LiteralPath $selectedPath -Directory -ErrorAction SilentlyContinue) {
+        if ($d.Name -eq "mods" -or $d.Name -match '^\d+(\.\d+){0,3}$') { continue }
+        Add-PzRoot $d.FullName $d.Name
+    }
+
+    return @($found)
+}
+
+function ConvertFrom-PzQuotedValue([string]$value) {
+    if ($null -eq $value) { return "" }
+    return $value.Replace('\"','"').Replace("\\'","'").Replace('\\\\','\\')
+}
+
+function Read-PzTranslationFolder([string]$contentRoot, [string]$rootLabel, [string]$pzCode, [string]$role) {
+    $rows = New-Object System.Collections.ArrayList
+    $folder = Join-Path $contentRoot "media\lua\shared\Translate\$pzCode"
+    if (-not (Test-Path -LiteralPath $folder)) { return @() }
+
+    foreach ($f in Get-ChildItem -LiteralPath $folder -File -Filter *.txt -Recurse -ErrorAction SilentlyContinue) {
+        # Recorded_Media and other structured formats need a dedicated parser.
+        # v0.8.0 only handles standard key = "value" translation tables.
+        if ($f.Name -like "Recorded_Media_*") { continue }
+
+        $lineNo = 0
+        foreach ($line in Get-Content -LiteralPath $f.FullName -Encoding UTF8 -ErrorAction SilentlyContinue) {
+            $lineNo++
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+
+            $key = $null
+            $value = $null
+
+            if ($line -match '^\s*([A-Za-z0-9_.\-\[\]]+)\s*=\s*"((?:\\.|[^"])*)"\s*,?\s*$') {
+                $key = [string]$Matches[1]
+                $value = ConvertFrom-PzQuotedValue ([string]$Matches[2])
+            } elseif ($line -match "^\s*([A-Za-z0-9_.\-\[\]]+)\s*=\s*'((?:\\.|[^'])*)'\s*,?\s*$") {
+                $key = [string]$Matches[1]
+                $value = ConvertFrom-PzQuotedValue ([string]$Matches[2])
+            }
+
+            if ([string]::IsNullOrWhiteSpace($key)) { continue }
+
+            [void]$rows.Add([pscustomobject]@{
+                Root = $rootLabel
+                File = [System.IO.Path]::GetFileName($f.FullName)
+                Key = $key
+                Source = if ($role -eq "Source") { $value } else { "" }
+                Translation = if ($role -eq "Target") { $value } else { "" }
+                Line = $lineNo
+            })
+        }
+    }
+
+    return @($rows)
+}
+
+function Get-PzEntryIdentity($entry) {
+    return "$($entry.Root)|$($entry.File)|$($entry.Key)"
+}
+
+function Refresh-PzGrid {
+    if ($null -eq $pzGrid) { return }
+    $pzGrid.ItemsSource = $null
+    $pzGrid.ItemsSource = @($script:PzEntries)
+    if ($null -ne $lblPzCount) {
+        $lblPzCount.Content = if ($script:UiLanguage -eq "en") {
+            "Entries: $($script:PzEntries.Count)"
+        } else {
+            "Wpisy: $($script:PzEntries.Count)"
+        }
+    }
+}
+
+function Scan-PzMod([string]$selectedPath) {
+    $sourceLang = Get-PzSelectedLanguage $cmbPzSourceLang
+    $targetLang = Get-PzSelectedLanguage $cmbPzTargetLang
+    if ($null -eq $sourceLang -or $null -eq $targetLang) { return $null }
+
+    if ($sourceLang.Code -ieq $targetLang.Code) {
+        throw $(if ($script:UiLanguage -eq "en") {
+            "Source and target language must be different."
+        } else {
+            "Jezyk zrodlowy i docelowy musza byc rozne."
+        })
+    }
+
+    $srcCode = Get-PzLanguageCode ([string]$sourceLang.Code)
+    $dstCode = Get-PzLanguageCode ([string]$targetLang.Code)
+
+    $roots = @(Find-PzModContentRoots $selectedPath)
+    if ($roots.Count -eq 0) {
+        throw $(if ($script:UiLanguage -eq "en") {
+            "No Project Zomboid translation root was found. Expected media/lua/shared/Translate, optionally inside a B42 version folder."
+        } else {
+            "Nie znaleziono katalogu tlumaczen Project Zomboid. Oczekiwano media/lua/shared/Translate, opcjonalnie w wersjonowanym folderze B42."
+        })
+    }
+
+    $result = New-Object System.Collections.ArrayList
+    $matched = 0
+    $targetCount = 0
+
+    foreach ($root in $roots) {
+        $sourceRows = @(Read-PzTranslationFolder $root.Path $root.Label $srcCode "Source")
+        $targetRows = @(Read-PzTranslationFolder $root.Path $root.Label $dstCode "Target")
+        $targetCount += $targetRows.Count
+
+        $targetMap = @{}
+        foreach ($r in $targetRows) {
+            $targetMap[(Get-PzEntryIdentity $r).ToLowerInvariant()] = [string]$r.Translation
+        }
+
+        foreach ($r in $sourceRows) {
+            $id = (Get-PzEntryIdentity $r).ToLowerInvariant()
+            if ($targetMap.ContainsKey($id)) {
+                $r.Translation = [string]$targetMap[$id]
+                $matched++
+            }
+            [void]$result.Add($r)
+        }
+    }
+
+    $script:PzEntries = @($result)
+    $script:PzContentRoots = @($roots)
+    Refresh-PzGrid
+
+    if ($pzGrid.Columns.Count -ge 5) {
+        $pzGrid.Columns[3].Header = [string]$sourceLang.NativeName
+        $pzGrid.Columns[4].Header = [string]$targetLang.NativeName
+    }
+
+    $status = if ($script:UiLanguage -eq "en") {
+        "Scan complete. Roots: $($roots.Count), source entries: $($result.Count), target entries: $targetCount, matched: $matched. Standard translation tables only."
+    } else {
+        "Skan zakonczony. Rooty: $($roots.Count), wpisy zrodlowe: $($result.Count), wpisy docelowe: $targetCount, dopasowane: $matched. Tylko standardowe tabele tlumaczen."
+    }
+    $txtPzStatus.Text = $status
+
+    return [pscustomobject]@{
+        Roots = $roots.Count
+        SourceEntries = $result.Count
+        TargetEntries = $targetCount
+        Matched = $matched
+    }
+}
+
+function Export-PzCsv([string]$path) {
+    $sourceLang = Get-PzSelectedLanguage $cmbPzSourceLang
+    $targetLang = Get-PzSelectedLanguage $cmbPzTargetLang
+
+    $src = if ($null -ne $sourceLang) { [string]$sourceLang.Code } else { "" }
+    $dst = if ($null -ne $targetLang) { [string]$targetLang.Code } else { "" }
+
+    $script:PzEntries |
+        Select-Object Root,File,Key,Source,Translation,Line,
+            @{N="SourceLanguage";E={$src}},
+            @{N="TargetLanguage";E={$dst}} |
+        Microsoft.PowerShell.Utility\Export-Csv -LiteralPath $path -NoTypeInformation -Encoding UTF8 -Delimiter ';'
+}
+
+function Import-PzCsv([string]$path) {
+    $rows = @(Microsoft.PowerShell.Utility\Import-Csv -LiteralPath $path -Encoding UTF8 -Delimiter ';')
+    if ($rows.Count -eq 0) { return 0 }
+
+    $lookup = @{}
+    foreach ($r in $rows) {
+        $id = "$([string]$r.Root)|$([string]$r.File)|$([string]$r.Key)".ToLowerInvariant()
+        $lookup[$id] = [string]$r.Translation
+    }
+
+    $updated = 0
+    foreach ($e in $script:PzEntries) {
+        $id = (Get-PzEntryIdentity $e).ToLowerInvariant()
+        if ($lookup.ContainsKey($id)) {
+            $e.Translation = [string]$lookup[$id]
+            $updated++
+        }
+    }
+
+    Refresh-PzGrid
+    return $updated
 }
 
 function Get-ProviderLanguageCode([string]$provider, [string]$languageCode, [string]$role="Any") {
@@ -4384,7 +4686,7 @@ function Apply-CreatorProfileToTranslator {
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Mod Translation Toolkit v0.7.8"
+        Title="Mod Translation Toolkit v0.8.0"
         Height="840" Width="1260"
         WindowStartupLocation="CenterScreen"
         Background="#121018"
@@ -4543,7 +4845,7 @@ function Apply-CreatorProfileToTranslator {
         <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
           <Button Name="btnApiSettings" Content="API / Tłumaczenie" Margin="0,0,8,0"/>
           <Border Background="#2B2038" CornerRadius="5" Padding="10,5" VerticalAlignment="Center">
-            <TextBlock Text="v0.7.8" Foreground="#CDA8F2" FontWeight="SemiBold"/>
+            <TextBlock Text="v0.8.0" Foreground="#CDA8F2" FontWeight="SemiBold"/>
           </Border>
         </StackPanel>
       </Grid>
@@ -4875,6 +5177,74 @@ function Apply-CreatorProfileToTranslator {
                      Text="Wykryj Kenshi lub wskaż folder instalacji. Profil obsługuje na razie tylko podstawową grę."/>
         </Grid>
       </TabItem>
+      <TabItem Name="tabProjectZomboidMod" Header="Project Zomboid Mod">
+        <Grid Margin="12" Background="{StaticResource Bg}">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
+
+          <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
+            <Button Name="btnChoosePzMod" Content="Wybierz folder moda"/>
+            <TextBox Name="txtPzModPath" Width="760" Margin="8,0" AllowDrop="True"
+                     ToolTip="Wybierz folder moda lub folder elementu Workshop Project Zomboid."/>
+            <Button Name="btnOpenPzModFolder" Content="Otworz folder"/>
+          </StackPanel>
+
+          <Border Grid.Row="1" Background="#211A2B" BorderBrush="#4A385D" BorderThickness="1"
+                  CornerRadius="6" Padding="10" Margin="0,0,0,10">
+            <StackPanel>
+              <TextBlock Name="txtPzTitle" Text="Project Zomboid Mod - eksperymentalny profil" FontSize="18"
+                         FontWeight="SemiBold" Foreground="#CDA8F2"/>
+              <TextBlock Name="txtPzSubtitle"
+                         Text="Podstawowa obsluga B41/B42: media/lua/shared/Translate, w tym wersjonowane katalogi modow B42."
+                         Foreground="#B9AEC9" Margin="0,4,0,0" TextWrapping="Wrap"/>
+              <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                <TextBlock Name="lblPzSource" Text="Zrodlo:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <ComboBox Name="cmbPzSourceLang" Width="220" Margin="0,0,14,0"/>
+                <TextBlock Name="lblPzTarget" Text="Cel:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <ComboBox Name="cmbPzTargetLang" Width="220"/>
+              </StackPanel>
+            </StackPanel>
+          </Border>
+
+          <WrapPanel Grid.Row="2" Margin="0,0,0,10">
+            <Button Name="btnScanPzMod" Content="Skanuj mod"/>
+            <Button Name="btnTranslatePzMissing" Content="Tlumacz brakujace"/>
+            <Button Name="btnExportPzCsv" Content="Eksport CSV"/>
+            <Button Name="btnImportPzCsv" Content="Import CSV"/>
+            <Label Name="lblPzCount" Content="Wpisy: 0" VerticalContentAlignment="Center" Margin="8,0,0,0"/>
+          </WrapPanel>
+
+          <DataGrid Grid.Row="3" Name="pzGrid" AutoGenerateColumns="False" CanUserAddRows="False"
+                    CanUserDeleteRows="False" IsReadOnly="False" SelectionMode="Extended"
+                    EnableRowVirtualization="True" AlternationCount="2">
+            <DataGrid.Columns>
+              <DataGridTextColumn Header="Root" Binding="{Binding Root}" Width="110" IsReadOnly="True"/>
+              <DataGridTextColumn Header="Plik" Binding="{Binding File}" Width="190" IsReadOnly="True"/>
+              <DataGridTextColumn Header="Klucz" Binding="{Binding Key}" Width="280" IsReadOnly="True"/>
+              <DataGridTemplateColumn Header="Zrodlo" Width="*">
+                <DataGridTemplateColumn.CellTemplate>
+                  <DataTemplate>
+                    <TextBox Text="{Binding Source}" IsReadOnly="True" IsReadOnlyCaretVisible="True"
+                             BorderThickness="0" Background="Transparent" Foreground="#ECE8F6"
+                             Padding="2,0" TextWrapping="NoWrap"/>
+                  </DataTemplate>
+                </DataGridTemplateColumn.CellTemplate>
+              </DataGridTemplateColumn>
+              <DataGridTextColumn Header="Tlumaczenie"
+                                  Binding="{Binding Translation, UpdateSourceTrigger=PropertyChanged}" Width="*"/>
+            </DataGrid.Columns>
+          </DataGrid>
+
+          <TextBlock Grid.Row="4" Name="txtPzStatus" Margin="0,10,0,0" TextWrapping="Wrap"
+                     Foreground="#B9AEC9"
+                     Text="Wybierz mod Project Zomboid. Ten profil jest eksperymentalny i na razie nie buduje paczki Workshop."/>
+        </Grid>
+      </TabItem>
         </TabControl>
       </TabItem>
       <TabItem Name="tabWorkshop" Header="Workshop">
@@ -4999,7 +5369,24 @@ $names = @(
   "cmbRwGameTargetLang",
   "lblCreatorId",
   "txtCreatorId",
-  "btnSaveCreatorId"
+  "btnSaveCreatorId",
+  "tabProjectZomboidMod",
+  "btnChoosePzMod",
+  "txtPzModPath",
+  "btnOpenPzModFolder",
+  "txtPzTitle",
+  "txtPzSubtitle",
+  "lblPzSource",
+  "cmbPzSourceLang",
+  "lblPzTarget",
+  "cmbPzTargetLang",
+  "btnScanPzMod",
+  "btnTranslatePzMissing",
+  "btnExportPzCsv",
+  "btnImportPzCsv",
+  "lblPzCount",
+  "pzGrid",
+  "txtPzStatus"
 )
 foreach ($n in $names) { Set-Variable -Name $n -Value $window.FindName($n) }
 
@@ -5056,6 +5443,8 @@ Populate-LanguageCombo $cmbTargetLang "pl"
 Select-PreviewFlagForTargetLanguage
 Populate-LanguageCombo $cmbRwGameSourceLang "en"
 Populate-LanguageCombo $cmbRwGameTargetLang "pl"
+Populate-PzLanguageCombo $cmbPzSourceLang "en"
+Populate-PzLanguageCombo $cmbPzTargetLang "pl"
 
 $cmbSourceLang.Add_SelectionChanged({
     if (-not [string]::IsNullOrWhiteSpace([string]$txtModPath.Text) -and (Test-ExistingFolderSafe $txtModPath.Text)) {
@@ -5105,6 +5494,7 @@ $script:UiText = @{
         RimWorldGame = "RimWorld Game"
         RimWorldMod = "RimWorld Mod"
         KenshiGame = "Kenshi Game"
+        ProjectZomboidMod = "Project Zomboid Mod"
         Translation = "Tłumaczenie"
         InstalledMods = "Zainstalowane mody"
         DetectRimWorld = "Wykryj RimWorld"
@@ -5167,6 +5557,10 @@ $script:UiText = @{
         ScanKenshiBase = "Skanuj podstawę gry"
         FcsHelp = "Jak wyeksportować dane z FCS?"
         BuildKenshi = "Zapisz pliki tłumaczenia"
+        PzScan = "Skanuj mod"
+        PzChooseMod = "Wybierz folder moda"
+        PzExperimentalTitle = "Project Zomboid Mod - profil eksperymentalny"
+        PzExperimentalSubtitle = "Podstawowa obsługa B41/B42: media/lua/shared/Translate, w tym wersjonowane katalogi modów B42."
         ApiSettings = "API / Tłumaczenie"
         LanguageBoth = "Oba"
         LanguageSource = "Oryginał"
@@ -5179,6 +5573,7 @@ $script:UiText = @{
         RimWorldGame = "RimWorld Game"
         RimWorldMod = "RimWorld Mod"
         KenshiGame = "Kenshi Game"
+        ProjectZomboidMod = "Project Zomboid Mod"
         Translation = "Translation"
         InstalledMods = "Installed mods"
         DetectRimWorld = "Detect RimWorld"
@@ -5241,6 +5636,10 @@ $script:UiText = @{
         ScanKenshiBase = "Scan base game"
         FcsHelp = "How to export data from FCS?"
         BuildKenshi = "Save translation files"
+        PzScan = "Scan mod"
+        PzChooseMod = "Choose mod folder"
+        PzExperimentalTitle = "Project Zomboid Mod - experimental profile"
+        PzExperimentalSubtitle = "Basic B41/B42 support: media/lua/shared/Translate, including versioned B42 mod folders."
         ApiSettings = "Translation API"
         LanguageBoth = "Both"
         LanguageSource = "Source"
@@ -5284,6 +5683,7 @@ function Apply-CentralUiLanguage {
     Set-ControlContentIfExists $tabRimWorldGame "RimWorldGame"
     Set-ControlContentIfExists $tabRimWorldMod "RimWorldMod"
     Set-ControlContentIfExists $tabKenshi "KenshiGame"
+    Set-ControlContentIfExists $tabProjectZomboidMod "ProjectZomboidMod"
     Set-ControlContentIfExists $tabTranslation "Translation"
     Set-ControlContentIfExists $tabInstalledMods "InstalledMods"
 
@@ -5356,6 +5756,18 @@ function Apply-CentralUiLanguage {
     Set-ControlContentIfExists $btnImportKenshiCsv "ImportCsv"
     Set-ControlContentIfExists $btnFcsHelpKenshi "FcsHelp"
     Set-ControlContentIfExists $btnBuildKenshi "BuildKenshi"
+
+    # Project Zomboid Mod
+    Set-ControlContentIfExists $btnChoosePzMod "PzChooseMod"
+    Set-ControlContentIfExists $btnOpenPzModFolder "OpenFolder"
+    Set-ControlContentIfExists $btnScanPzMod "PzScan"
+    Set-ControlContentIfExists $btnTranslatePzMissing "TranslateMissing"
+    Set-ControlContentIfExists $btnExportPzCsv "ExportCsv"
+    Set-ControlContentIfExists $btnImportPzCsv "ImportCsv"
+    if ($null -ne $txtPzTitle) { $txtPzTitle.Text = T "PzExperimentalTitle" }
+    if ($null -ne $txtPzSubtitle) { $txtPzSubtitle.Text = T "PzExperimentalSubtitle" }
+    if ($null -ne $lblPzSource) { $lblPzSource.Text = if ($script:UiLanguage -eq "en") { "Source:" } else { "Źródło:" } }
+    if ($null -ne $lblPzTarget) { $lblPzTarget.Text = if ($script:UiLanguage -eq "en") { "Target:" } else { "Cel:" } }
 
     # API
     Set-ControlContentIfExists $btnApiSettings "ApiSettings"
@@ -5784,6 +6196,120 @@ $grid.Add_PreviewKeyDown({
 })
 
 
+
+
+$btnChoosePzMod.Add_Click({
+    $picked = Show-ModernFolderPicker `
+        $(if ($script:UiLanguage -eq "en") { "Choose a Project Zomboid mod or Workshop item folder" } else { "Wybierz folder moda lub elementu Workshop Project Zomboid" }) `
+        $txtPzModPath.Text
+    if ($picked) { $txtPzModPath.Text = $picked }
+})
+
+$btnOpenPzModFolder.Add_Click({
+    if (Test-Path -LiteralPath $txtPzModPath.Text) {
+        Start-Process explorer.exe -ArgumentList "`"$($txtPzModPath.Text)`""
+    }
+})
+
+$btnScanPzMod.Add_Click({
+    try {
+        Scan-PzMod $txtPzModPath.Text | Out-Null
+    } catch {
+        [System.Windows.MessageBox]::Show($_.Exception.Message, "Project Zomboid Mod") | Out-Null
+    }
+})
+
+$btnTranslatePzMissing.Add_Click({
+    if ($script:PzEntries.Count -eq 0) {
+        [System.Windows.MessageBox]::Show(
+            $(if ($script:UiLanguage -eq "en") { "Scan a Project Zomboid mod first." } else { "Najpierw zeskanuj mod Project Zomboid." }),
+            "Project Zomboid Mod"
+        ) | Out-Null
+        return
+    }
+
+    $src = Get-PzSelectedLanguage $cmbPzSourceLang
+    $dst = Get-PzSelectedLanguage $cmbPzTargetLang
+    if ($null -eq $src -or $null -eq $dst) { return }
+    if (-not (Require-TranslationProvider)) { return }
+
+    $missing = @($script:PzEntries | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.Translation) })
+    $done = 0
+    foreach ($e in $missing) {
+        try {
+            $e.Translation = Translate-Configured ([string]$e.Source) ([string]$src.Code) ([string]$dst.Code)
+            $done++
+            if (($done % 20) -eq 0) {
+                Refresh-PzGrid
+                [System.Windows.Forms.Application]::DoEvents()
+            }
+        } catch {}
+    }
+    Refresh-PzGrid
+    $txtPzStatus.Text = if ($script:UiLanguage -eq "en") {
+        "Automatic translation completed: $done / $($missing.Count)."
+    } else {
+        "Automatyczne tlumaczenie zakonczone: $done / $($missing.Count)."
+    }
+})
+
+$btnExportPzCsv.Add_Click({
+    if ($script:PzEntries.Count -eq 0) { return }
+    $dlg = New-Object Microsoft.Win32.SaveFileDialog
+    $dlg.Filter = "CSV (*.csv)|*.csv"
+    $dlg.DefaultExt = ".csv"
+    $dlg.FileName = "Project-Zomboid-Translation.csv"
+    if ($dlg.ShowDialog() -eq $true) {
+        try {
+            Export-PzCsv $dlg.FileName
+            $txtPzStatus.Text = if ($script:UiLanguage -eq "en") { "CSV exported: $($dlg.FileName)" } else { "CSV zapisany: $($dlg.FileName)" }
+        } catch {
+            [System.Windows.MessageBox]::Show($_.Exception.Message, "Project Zomboid CSV") | Out-Null
+        }
+    }
+})
+
+$btnImportPzCsv.Add_Click({
+    if ($script:PzEntries.Count -eq 0) { return }
+    $dlg = New-Object Microsoft.Win32.OpenFileDialog
+    $dlg.Filter = "CSV (*.csv)|*.csv"
+    if ($dlg.ShowDialog() -eq $true) {
+        try {
+            $updated = Import-PzCsv $dlg.FileName
+            $txtPzStatus.Text = if ($script:UiLanguage -eq "en") {
+                "Imported translations for $updated entries."
+            } else {
+                "Zaimportowano tlumaczenia dla $updated wpisow."
+            }
+        } catch {
+            [System.Windows.MessageBox]::Show($_.Exception.Message, "Project Zomboid CSV") | Out-Null
+        }
+    }
+})
+
+$cmbPzSourceLang.Add_SelectionChanged({
+    if (-not [string]::IsNullOrWhiteSpace([string]$txtPzModPath.Text) -and (Test-Path -LiteralPath $txtPzModPath.Text)) {
+        try { Scan-PzMod $txtPzModPath.Text | Out-Null } catch {}
+    }
+})
+
+$cmbPzTargetLang.Add_SelectionChanged({
+    if (-not [string]::IsNullOrWhiteSpace([string]$txtPzModPath.Text) -and (Test-Path -LiteralPath $txtPzModPath.Text)) {
+        try { Scan-PzMod $txtPzModPath.Text | Out-Null } catch {}
+    }
+})
+
+$txtPzModPath.Add_Drop({
+    param($sender,$e)
+    try {
+        if ($e.Data.GetDataPresent([System.Windows.DataFormats]::FileDrop)) {
+            $paths = @($e.Data.GetData([System.Windows.DataFormats]::FileDrop))
+            if ($paths.Count -gt 0 -and (Test-Path -LiteralPath $paths[0] -PathType Container)) {
+                $txtPzModPath.Text = [string]$paths[0]
+            }
+        }
+    } catch {}
+})
 
 $btnDetectKenshi.Add_Click({
     $detected = Get-KenshiInstallPath
