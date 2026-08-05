@@ -1,7 +1,7 @@
 using Microsoft.Win32;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Forms;
+using Forms = System.Windows.Forms;
 using ModTranslationToolkit.Models;
 using ModTranslationToolkit.Services;
 using ModTranslationToolkit.ViewModels;
@@ -22,8 +22,8 @@ public partial class MainWindow : Window
 
     private void ChooseFolder_Click(object sender, RoutedEventArgs e)
     {
-        using var dlg = new FolderBrowserDialog { UseDescriptionForTitle = true, Description = "Choose game or mod folder" };
-        if (dlg.ShowDialog() != System.Windows.Forms.DialogResult.OK) return;
+        using var dlg = new Forms.FolderBrowserDialog { UseDescriptionForTitle = true, Description = "Choose game or mod folder" };
+        if (dlg.ShowDialog() != Forms.DialogResult.OK) return;
         _currentPath = dlg.SelectedPath;
         Tag = _currentPath;
         _vm.Status = _currentPath;

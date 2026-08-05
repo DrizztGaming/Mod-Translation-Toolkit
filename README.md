@@ -12,7 +12,7 @@ There is no PowerShell requirement at runtime.
 
 ## Current preview foundation
 
-Implemented in Preview 1:
+Implemented in Preview 2:
 
 - Native WPF application shell
 - Dark Mrokar UI
@@ -75,3 +75,9 @@ Next:
 8. Kenshi native workflow migration
 9. Steam Workshop dashboard
 10. Code signing / installer
+
+## Preview 2 build fixes
+
+- Added explicit `System.Net.Http` import for LibreTranslate.
+- Resolved WPF/WinForms `Application` ambiguity.
+- Aliased WinForms usage in `MainWindow.xaml.cs` to reduce future namespace collisions.
