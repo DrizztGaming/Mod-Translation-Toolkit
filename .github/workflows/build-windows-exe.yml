@@ -22,27 +22,48 @@ jobs:
         with:
           dotnet-version: "8.0.x"
 
+      - name: Source audit
+        shell: pwsh
+        run: ./tools/source-audit.ps1
+
       - name: Restore
         run: dotnet restore ModTranslationToolkit.sln
 
       - name: Build
         run: dotnet build ModTranslationToolkit.sln -c Release --no-restore
 
-      - name: Publish Windows x64 EXE
+      - name: Publish framework-dependent
+        run: >
+          dotnet publish src/ModTranslationToolkit/ModTranslationToolkit.csproj
+          -c Release
+          -r win-x64
+          --self-contained false
+          -p:PublishSingleFile=false
+          -p:DebugType=None
+          -p:DebugSymbols=false
+          -o publish/framework-dependent
+
+      - name: Publish self-contained multi-file
         run: >
           dotnet publish src/ModTranslationToolkit/ModTranslationToolkit.csproj
           -c Release
           -r win-x64
           --self-contained true
-          -p:PublishSingleFile=true
-          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:PublishSingleFile=false
           -p:DebugType=None
           -p:DebugSymbols=false
-          -o publish/win-x64
+          -o publish/self-contained
 
-      - name: Upload EXE
+      - name: Upload framework-dependent build
         uses: actions/upload-artifact@v4
         with:
-          name: ModTranslationToolkit-v1-win-x64
-          path: publish/win-x64/**
+          name: ModTranslationToolkit-v1-framework-dependent-win-x64
+          path: publish/framework-dependent/**
+          if-no-files-found: error
+
+      - name: Upload self-contained build
+        uses: actions/upload-artifact@v4
+        with:
+          name: ModTranslationToolkit-v1-self-contained-win-x64
+          path: publish/self-contained/**
           if-no-files-found: error
