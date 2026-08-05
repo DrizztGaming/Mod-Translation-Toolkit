@@ -12,7 +12,7 @@ There is no PowerShell requirement at runtime.
 
 ## Current preview foundation
 
-Implemented in Preview 2:
+Implemented in Preview 3:
 
 - Native WPF application shell
 - Dark Mrokar UI
@@ -81,3 +81,10 @@ Next:
 - Added explicit `System.Net.Http` import for LibreTranslate.
 - Resolved WPF/WinForms `Application` ambiguity.
 - Aliased WinForms usage in `MainWindow.xaml.cs` to reduce future namespace collisions.
+
+## Preview 3 build fixes
+
+- Added explicit `System.IO` imports to scanner/service files.
+- Added explicit standard-library imports across the v1 codebase.
+- Reduced reliance on SDK implicit usings.
+- Extended CI source audit to catch missing IO imports before compilation.

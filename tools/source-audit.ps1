@@ -13,6 +13,22 @@ if ($libre -notmatch "using System\.Net\.Http;") {
     $errors += "LibreTranslateService.cs is missing using System.Net.Http"
 }
 
+
+$ioFiles = @(
+    "src\ModTranslationToolkit\Services\CsvService.cs",
+    "src\ModTranslationToolkit\Services\ProjectZomboidScanner.cs",
+    "src\ModTranslationToolkit\Services\RimWorldScanner.cs",
+    "src\ModTranslationToolkit\Services\SteamDetector.cs",
+    "src\ModTranslationToolkit\MainWindow.xaml.cs"
+)
+
+foreach ($rel in $ioFiles) {
+    $content = Get-Content (Join-Path $root $rel) -Raw
+    if ($content -notmatch "using System\.IO;") {
+        $errors += "$rel is missing using System.IO"
+    }
+}
+
 if ($errors.Count -gt 0) {
     $errors | ForEach-Object { Write-Error $_ }
     exit 1
