@@ -7,7 +7,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-$AppVersion = "0.7.8"
+$AppVersion = "0.10.8"
 $script:UiLanguage = "pl"
 $script:Entries = New-Object System.Collections.ArrayList
 $script:Mods = New-Object System.Collections.ArrayList
@@ -173,7 +173,7 @@ function Save-TranslationProviderSettings($settings) {
     [System.IO.File]::WriteAllText(
         $path,
         ($obj | ConvertTo-Json),
-        (New-Object System.Text.UTF8Encoding($false))
+        (New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false))
     )
 }
 
@@ -575,14 +575,76 @@ function Show-TranslationApiSettingsWindow {
     [void]$dlg.ShowDialog()
 }
 
-function Test-TranslationProviderConfigured {
-    $s = Get-TranslationProviderSettings
-    switch ($s.Provider) {
-        "Google" { return -not [string]::IsNullOrWhiteSpace($s.GoogleKey) }
-        "DeepL" { return -not [string]::IsNullOrWhiteSpace($s.DeepLKey) }
-        "LibreTranslate" { return -not [string]::IsNullOrWhiteSpace($s.LibreEndpoint) }
-        default { return $false }
+function Get-ConfiguredTranslationProviderName {
+    try {
+        $settings = Get-TranslationProviderSettings
+        if ($null -eq $settings) { return "" }
+
+        $provider = [string]$settings.Provider
+        switch -Regex ($provider) {
+            '^Google' { return "Google" }
+            '^DeepL' { return "DeepL" }
+            '^LibreTranslate$' { return "LibreTranslate" }
+            '^Libre' { return "LibreTranslate" }
+            default { return $provider }
+        }
+    } catch {
+        return ""
     }
+}
+
+function Test-TranslationProviderConfigured {
+    try {
+        # IMPORTANT: use the exact same persisted settings object consumed by
+        # Translate-Configured / Test-TranslationLanguagePair.
+        $settings = Get-TranslationProviderSettings
+        if ($null -eq $settings) { return $false }
+
+        $provider = [string]$settings.Provider
+        switch ($provider) {
+            "Google" {
+                return -not [string]::IsNullOrWhiteSpace([string]$settings.GoogleKey)
+            }
+            "DeepL" {
+                return -not [string]::IsNullOrWhiteSpace([string]$settings.DeepLKey)
+            }
+            "LibreTranslate" {
+                # Self-hosted LibreTranslate does not require an API key.
+                return -not [string]::IsNullOrWhiteSpace([string]$settings.LibreEndpoint)
+            }
+            default {
+                return $false
+            }
+        }
+    } catch {
+        return $false
+    }
+}
+
+function Show-MissingTranslationProviderMessage {
+    $provider = Get-ConfiguredTranslationProviderName
+    $providerText = if ([string]::IsNullOrWhiteSpace($provider)) { "none" } else { $provider }
+
+    $detail = ""
+    try {
+        $settings = Get-TranslationProviderSettings
+        if ($provider -eq "LibreTranslate") {
+            $endpoint = [string]$settings.LibreEndpoint
+            if ([string]::IsNullOrWhiteSpace($endpoint)) {
+                $detail = if ($script:UiLanguage -eq "en") { "`nLibreTranslate endpoint is empty." } else { "`nEndpoint LibreTranslate jest pusty." }
+            } else {
+                $detail = if ($script:UiLanguage -eq "en") { "`nLibreTranslate endpoint: $endpoint" } else { "`nEndpoint LibreTranslate: $endpoint" }
+            }
+        }
+    } catch {}
+
+    $msg = if ($script:UiLanguage -eq "en") {
+        "The selected translation provider is not ready: $providerText.$detail`n`nOpen API / Translation and verify its configuration."
+    } else {
+        "Wybrany dostawca tłumaczeń nie jest gotowy: $providerText.$detail`n`nOtwórz API / Tłumaczenie i sprawdź konfigurację."
+    }
+
+    [System.Windows.MessageBox]::Show($msg, "Mod Translation Toolkit") | Out-Null
 }
 
 function Require-TranslationProvider {
@@ -1113,6 +1175,1923 @@ function Get-SelectedLanguageFromCombo($combo) {
     return Get-LanguageByCode ([string]$combo.SelectedItem.Tag)
 }
 
+
+
+# ---------- Project Zomboid Game experimental profile ----------
+$script:PzGameSourceMap = @{}
+$script:PzGameTargetMap = @{}
+$script:PzGameTargetOnlyCount = 0
+$script:PzGameEntries = @()
+
+function Get-PzInstallPath {
+    $candidates = New-Object System.Collections.ArrayList
+
+    try {
+        $steamPath = (Get-ItemProperty -Path "HKCU:\Software\Valve\Steam" -ErrorAction Stop).SteamPath
+        if ($steamPath) { [void]$candidates.Add($steamPath) }
+    } catch {}
+
+    foreach ($envPath in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if (-not [string]::IsNullOrWhiteSpace($envPath)) {
+            $p = Join-Path $envPath "Steam"
+            if (Test-Path -LiteralPath $p) { [void]$candidates.Add($p) }
+        }
+    }
+
+    $libraries = New-Object System.Collections.ArrayList
+    foreach ($steam in @($candidates | Select-Object -Unique)) {
+        if (-not (Test-Path -LiteralPath $steam)) { continue }
+        [void]$libraries.Add($steam)
+
+        $vdf = Join-Path $steam "steamapps\libraryfolders.vdf"
+        if (Test-Path -LiteralPath $vdf) {
+            try {
+                foreach ($line in Get-Content -LiteralPath $vdf -Encoding UTF8 -ErrorAction SilentlyContinue) {
+                    if ($line -match '"path"\s+"([^"]+)"') {
+                        $lib = [string]$Matches[1]
+                        $lib = $lib -replace '\\\\','\'
+                        if (Test-Path -LiteralPath $lib) {
+                            [void]$libraries.Add($lib)
+                        }
+                    }
+                }
+            } catch {}
+        }
+    }
+
+    foreach ($lib in @($libraries | Select-Object -Unique)) {
+        $game = Join-Path $lib "steamapps\common\ProjectZomboid"
+        if (Test-Path -LiteralPath (Join-Path $game "media\lua\shared\Translate")) {
+            return $game
+        }
+
+        # Some installs may expose the display-name folder.
+        $game2 = Join-Path $lib "steamapps\common\Project Zomboid"
+        if (Test-Path -LiteralPath (Join-Path $game2 "media\lua\shared\Translate")) {
+            return $game2
+        }
+    }
+
+    return $null
+}
+
+function Read-PzGameTranslationFolder([string]$gameRoot, [string]$pzCode, [string]$role) {
+    $folder = Join-Path $gameRoot "media\lua\shared\Translate\$pzCode"
+    if (-not (Test-Path -LiteralPath $folder)) { return @() }
+
+    $rows = New-Object System.Collections.ArrayList
+    $files = @(Get-PzTranslationFiles $folder)
+    $fileIndex = 0
+    $fileTotal = $files.Count
+
+    foreach ($f in $files) {
+        $fileIndex++
+        if (($fileIndex % 10) -eq 0 -or $fileIndex -eq 1 -or $fileIndex -eq $fileTotal) {
+            if ($role -eq "Source") {
+                $pct = 5 + [int](35 * ($fileIndex / [math]::Max(1,$fileTotal)))
+                Set-PzGameScanProgress $pct $(if ($script:UiLanguage -eq "en") {
+                    "Scanning source files: $fileIndex / $fileTotal"
+                } else {
+                    "Skanowanie plików źródłowych: $fileIndex / $fileTotal"
+                })
+            } else {
+                $pct = 40 + [int](35 * ($fileIndex / [math]::Max(1,$fileTotal)))
+                Set-PzGameScanProgress $pct $(if ($script:UiLanguage -eq "en") {
+                    "Scanning target files: $fileIndex / $fileTotal"
+                } else {
+                    "Skanowanie plików docelowych: $fileIndex / $fileTotal"
+                })
+            }
+        }
+        if ($f.Name -like "Recorded_Media_*" -and $f.Extension -ieq ".txt") { continue }
+
+        if ($f.Extension -ieq ".json") {
+            foreach ($jr in @(Read-PzJsonTranslationFile $f.FullName)) {
+                [void]$rows.Add([pscustomobject]@{
+                    File = [System.IO.Path]::GetFileName($f.FullName)
+                    Key = [string]$jr.Key
+                    Source = if ($role -eq "Source") { [string]$jr.Value } else { "" }
+                    Translation = if ($role -eq "Target") { [string]$jr.Value } else { "" }
+                    Line = 0
+                    Format = "JSON"
+                })
+            }
+            continue
+        }
+
+        $lineNo = 0
+        foreach ($line in Get-Content -LiteralPath $f.FullName -Encoding UTF8 -ErrorAction SilentlyContinue) {
+            $lineNo++
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+
+            $key = $null
+            $value = $null
+
+            if ($line -match '^\s*([A-Za-z0-9_.\-\[\]]+)\s*=\s*"((?:\\.|[^"])*)"\s*,?\s*$') {
+                $key = [string]$Matches[1]
+                $value = ConvertFrom-PzQuotedValue ([string]$Matches[2])
+            } elseif ($line -match "^\s*([A-Za-z0-9_.\-\[\]]+)\s*=\s*'((?:\\.|[^'])*)'\s*,?\s*$") {
+                $key = [string]$Matches[1]
+                $value = ConvertFrom-PzQuotedValue ([string]$Matches[2])
+            }
+
+            if ([string]::IsNullOrWhiteSpace($key)) { continue }
+
+            [void]$rows.Add([pscustomobject]@{
+                File = [System.IO.Path]::GetFileName($f.FullName)
+                Key = $key
+                Source = if ($role -eq "Source") { $value } else { "" }
+                Translation = if ($role -eq "Target") { $value } else { "" }
+                Line = $lineNo
+                Format = "TXT"
+            })
+        }
+    }
+    return @($rows)
+}
+
+function Get-PzGameEntryIdentity($entry) {
+    return "$($entry.File)|$($entry.Key)"
+}
+
+
+
+function Set-PzGameScanProgress([int]$percent, [string]$message="") {
+    if ($percent -lt 0) { $percent = 0 }
+    if ($percent -gt 100) { $percent = 100 }
+
+    if ($null -ne $prgPzGameScan) {
+        $prgPzGameScan.Value = $percent
+    }
+    if ($null -ne $lblPzGameProgress) {
+        $lblPzGameProgress.Text = "$percent%"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($message) -and $null -ne $txtPzGameStatus) {
+        $txtPzGameStatus.Text = $message
+    }
+
+    try {
+        [System.Windows.Forms.Application]::DoEvents()
+    } catch {}
+}
+
+function Set-PzGameWorkProgress([int]$percent, [string]$message="") {
+    if ($percent -lt 0) { $percent = 0 }
+    if ($percent -gt 100) { $percent = 100 }
+
+    if ($null -ne $prgPzGameScan) {
+        $prgPzGameScan.Value = $percent
+    }
+    if ($null -ne $lblPzGameProgress) {
+        $lblPzGameProgress.Text = "$percent%"
+    }
+    if (-not [string]::IsNullOrWhiteSpace($message) -and $null -ne $txtPzGameStatus) {
+        $txtPzGameStatus.Text = $message
+    }
+
+    try {
+        [System.Windows.Forms.Application]::DoEvents()
+    } catch {}
+}
+
+
+function Get-PzGameCoverage {
+    $srcMap = $script:PzGameSourceMap
+    $dstMap = $script:PzGameTargetMap
+
+    if ($null -eq $srcMap -or $null -eq $dstMap) {
+        return [pscustomobject]@{ Total=0; Missing=0; Identical=0; Translated=0; TargetOnly=0 }
+    }
+
+    $missing = 0
+    $identical = 0
+    $translated = 0
+
+    foreach ($key in $srcMap.Keys) {
+        if (-not $dstMap.ContainsKey($key)) {
+            $missing++
+            continue
+        }
+
+        $s = [string]$srcMap[$key]
+        $d = [string]$dstMap[$key]
+        if ($s.Trim() -ceq $d.Trim()) { $identical++ } else { $translated++ }
+    }
+
+    return [pscustomobject]@{
+        Total = $srcMap.Count
+        Missing = $missing
+        Identical = $identical
+        Translated = $translated
+        TargetOnly = $script:PzGameTargetOnlyCount
+    }
+}
+
+
+function Apply-PzGameFilter {
+    if ($null -eq $cmbPzGameFilter -or $null -eq $pzGameGrid) {
+        Refresh-PzGameGrid
+        return
+    }
+
+    $mode = if ($null -ne $cmbPzGameFilter.SelectedItem) { [string]$cmbPzGameFilter.SelectedItem.Tag } else { "all" }
+    $items = @($script:PzGameEntries)
+
+    switch ($mode) {
+        "missing" {
+            $items = @($items | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.Translation) })
+        }
+        "identical" {
+            $items = @($items | Where-Object {
+                -not [string]::IsNullOrWhiteSpace([string]$_.Translation) -and
+                ([string]$_.Source).Trim() -ceq ([string]$_.Translation).Trim()
+            })
+        }
+        "suspicious" {
+            $items = @($items | Where-Object {
+                [string]::IsNullOrWhiteSpace([string]$_.Translation) -or
+                (([string]$_.Source).Trim() -ceq ([string]$_.Translation).Trim())
+            })
+        }
+    }
+
+    $pzGameGrid.ItemsSource = $null
+    $pzGameGrid.ItemsSource = $items
+    if ($null -ne $lblPzGameCount) {
+        $lblPzGameCount.Content = if ($script:UiLanguage -eq "en") {
+            "Entries: $($items.Count) / $($script:PzGameEntries.Count)"
+        } else {
+            "Wpisy: $($items.Count) / $($script:PzGameEntries.Count)"
+        }
+    }
+}
+
+function Refresh-PzGameGrid {
+    if ($null -eq $pzGameGrid) { return }
+    $pzGameGrid.ItemsSource = $null
+    $pzGameGrid.ItemsSource = @($script:PzGameEntries)
+    if ($null -ne $lblPzGameCount) {
+        $lblPzGameCount.Content = if ($script:UiLanguage -eq "en") {
+            "Entries: $($script:PzGameEntries.Count)"
+        } else {
+            "Wpisy: $($script:PzGameEntries.Count)"
+        }
+    }
+}
+
+function Scan-PzGame([string]$gameRoot) {
+    Set-PzGameScanProgress 0 $(if ($script:UiLanguage -eq "en") { "Preparing Project Zomboid scan..." } else { "Przygotowanie skanowania Project Zomboid..." })
+    if ($null -ne $btnScanPzGame) { $btnScanPzGame.IsEnabled = $false }
+    try {
+    if ([string]::IsNullOrWhiteSpace($gameRoot) -or -not (Test-Path -LiteralPath $gameRoot)) {
+        throw $(if ($script:UiLanguage -eq "en") { "Choose a valid Project Zomboid game folder." } else { "Wybierz prawidłowy folder gry Project Zomboid." })
+    }
+
+    $srcLang = Get-PzSelectedLanguage $cmbPzGameSourceLang
+    $dstLang = Get-PzSelectedLanguage $cmbPzGameTargetLang
+    if ($null -eq $srcLang -or $null -eq $dstLang) { return $null }
+
+    if ($srcLang.Code -ieq $dstLang.Code) {
+        throw $(if ($script:UiLanguage -eq "en") { "Source and target language must be different." } else { "Język źródłowy i docelowy muszą być różne." })
+    }
+
+    $srcCode = Get-PzLanguageCode ([string]$srcLang.Code)
+    $dstCode = Get-PzLanguageCode ([string]$dstLang.Code)
+    if ([string]::IsNullOrWhiteSpace($srcCode) -or [string]::IsNullOrWhiteSpace($dstCode)) {
+        throw "Selected language is not mapped for Project Zomboid."
+    }
+
+    Set-PzGameScanProgress 5 $(if ($script:UiLanguage -eq "en") { "Scanning source language..." } else { "Skanowanie języka źródłowego..." })
+    $sourceRows = @(Read-PzGameTranslationFolder $gameRoot $srcCode "Source")
+    Set-PzGameScanProgress 40 $(if ($script:UiLanguage -eq "en") { "Source scan complete. Scanning target language..." } else { "Źródło zeskanowane. Skanowanie języka docelowego..." })
+    $targetRows = @(Read-PzGameTranslationFolder $gameRoot $dstCode "Target")
+    Set-PzGameScanProgress 75 $(if ($script:UiLanguage -eq "en") { "Building source/target indexes..." } else { "Budowanie indeksów source/target..." })
+
+    $sourceMap = @{}
+    foreach ($r in $sourceRows) {
+        $sourceMap[(Get-PzGameEntryIdentity $r).ToLowerInvariant()] = [string]$r.Source
+    }
+
+    $targetMap = @{}
+    foreach ($r in $targetRows) {
+        $targetMap[(Get-PzGameEntryIdentity $r).ToLowerInvariant()] = [string]$r.Translation
+    }
+
+    $targetOnly = 0
+    foreach ($key in $targetMap.Keys) {
+        if (-not $sourceMap.ContainsKey($key)) { $targetOnly++ }
+    }
+
+    $script:PzGameSourceMap = $sourceMap
+    $script:PzGameTargetMap = $targetMap
+    $script:PzGameTargetOnlyCount = $targetOnly
+
+    Set-PzGameScanProgress 85 $(if ($script:UiLanguage -eq "en") { "Matching translations..." } else { "Dopasowywanie tłumaczeń..." })
+    $matched = 0
+    foreach ($r in $sourceRows) {
+        $id = (Get-PzGameEntryIdentity $r).ToLowerInvariant()
+        if ($targetMap.ContainsKey($id)) {
+            $r.Translation = [string]$targetMap[$id]
+            $matched++
+        }
+    }
+
+    $script:PzGameEntries = @($sourceRows)
+    Refresh-PzGameGrid
+    try { Apply-PzGameFilter } catch {}
+
+    if ($pzGameGrid.Columns.Count -ge 4) {
+        $pzGameGrid.Columns[2].Header = [string]$srcLang.NativeName
+        $pzGameGrid.Columns[3].Header = [string]$dstLang.NativeName
+    }
+
+    Set-PzGameScanProgress 95 $(if ($script:UiLanguage -eq "en") { "Calculating coverage..." } else { "Liczenie pokrycia..." })
+    $coverage = Get-PzGameCoverage
+    $txtPzGameStatus.Text = if ($script:UiLanguage -eq "en") {
+        "Scan complete. Source: $($sourceRows.Count), target: $($targetRows.Count), matched: $matched | Missing: $($coverage.Missing) | Identical: $($coverage.Identical) | Translated: $($coverage.Translated) | Target-only: $($coverage.TargetOnly)"
+    } else {
+        "Skan zakończony. Źródło: $($sourceRows.Count), cel: $($targetRows.Count), dopasowane: $matched | Brak: $($coverage.Missing) | Identyczne: $($coverage.Identical) | Przetłumaczone: $($coverage.Translated) | Tylko target: $($coverage.TargetOnly)"
+    }
+
+    Set-PzGameScanProgress 100 $(if ($script:UiLanguage -eq "en") { "Project Zomboid scan complete." } else { "Skanowanie Project Zomboid zakończone." })
+
+    return [pscustomobject]@{
+        SourceEntries = $sourceRows.Count
+        TargetEntries = $targetRows.Count
+        Matched = $matched
+    }
+    }
+    finally {
+        if ($null -ne $btnScanPzGame) { $btnScanPzGame.IsEnabled = $true }
+    }
+}
+
+function Save-PzGameCheckpoint([string]$reason = "autosave") {
+    if ($script:PzGameEntries.Count -eq 0) { return $null }
+
+    $srcLang = Get-PzSelectedLanguage $cmbPzGameSourceLang
+    $dstLang = Get-PzSelectedLanguage $cmbPzGameTargetLang
+    $src = if ($null -ne $srcLang) { [string]$srcLang.Code } else { "" }
+    $dst = if ($null -ne $dstLang) { [string]$dstLang.Code } else { "" }
+
+    $autosaveDir = Get-ToolkitAutosaveDirectory
+    $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $path = Join-Path $autosaveDir "$stamp-ProjectZomboidGame-$src-$dst.csv"
+    $latest = Join-Path $autosaveDir "latest-pz-game.csv"
+
+    $rows = @(
+        $script:PzGameEntries |
+            Select-Object File,Key,Source,Translation,Line,Format,
+                @{N="SourceLanguage";E={$src}},
+                @{N="TargetLanguage";E={$dst}}
+    )
+    Write-ToolkitCsvAtomic $rows $path
+    Copy-Item -LiteralPath $path -Destination $latest -Force
+    return $path
+}
+
+function Export-PzGameCsv([string]$path) {
+    [void](Save-PzGameCheckpoint "before-csv-export")
+
+    $srcLang = Get-PzSelectedLanguage $cmbPzGameSourceLang
+    $dstLang = Get-PzSelectedLanguage $cmbPzGameTargetLang
+    $src = if ($null -ne $srcLang) { [string]$srcLang.Code } else { "" }
+    $dst = if ($null -ne $dstLang) { [string]$dstLang.Code } else { "" }
+
+    $rows = @(
+        $script:PzGameEntries |
+            Select-Object File,Key,Source,Translation,Line,Format,
+                @{N="SourceLanguage";E={$src}},
+                @{N="TargetLanguage";E={$dst}}
+    )
+    Write-ToolkitCsvAtomic $rows $path
+}
+
+function Import-PzGameCsv([string]$path) {
+    $rows = @(Microsoft.PowerShell.Utility\Import-Csv -LiteralPath $path -Encoding UTF8 -Delimiter ';')
+    if ($rows.Count -eq 0) { return 0 }
+
+    $lookup = @{}
+    foreach ($r in $rows) {
+        $id = "$([string]$r.File)|$([string]$r.Key)".ToLowerInvariant()
+        $lookup[$id] = [string]$r.Translation
+    }
+
+    $updated = 0
+    foreach ($e in $script:PzGameEntries) {
+        $id = (Get-PzGameEntryIdentity $e).ToLowerInvariant()
+        if ($lookup.ContainsKey($id)) {
+            $e.Translation = [string]$lookup[$id]
+            $updated++
+        }
+    }
+
+    Refresh-PzGameGrid
+    return $updated
+}
+
+# ---------- Project Zomboid experimental profile ----------
+$script:PzEditingTranslationPath = ""
+$script:PzLastBuildPath = ""
+$script:PzLastWorkshopDescriptionPath = ""
+$script:PzLastWorkshopStagePath = ""
+$script:PzDetectedMods = @()
+$script:PzEntries = @()
+$script:PzContentRoots = @()
+
+function Get-PzLanguageCode([string]$code) {
+    switch ($code.ToLowerInvariant()) {
+        "en" { return "EN" }
+        "pl" { return "PL" }
+        "de" { return "DE" }
+        "fr" { return "FR" }
+        "es" { return "ES" }
+        "it" { return "IT" }
+        "pt" { return "PT" }
+        "pt-br" { return "PTBR" }
+        "cs" { return "CZ" }
+        "uk" { return "UA" }
+        "ru" { return "RU" }
+        "ja" { return "JP" }
+        "ko" { return "KO" }
+        "zh-cn" { return "CN" }
+        "zh-tw" { return "CH" }
+        "nl" { return "NL" }
+        default { return $null }
+    }
+}
+
+function Populate-PzLanguageCombo($combo, [string]$selectedCode) {
+    if ($null -eq $combo) { return }
+    $combo.Items.Clear()
+
+    foreach ($lang in $script:Languages) {
+        $pzCode = Get-PzLanguageCode ([string]$lang.Code)
+        if ([string]::IsNullOrWhiteSpace($pzCode)) { continue }
+
+        $item = New-Object System.Windows.Controls.ComboBoxItem
+        $item.Content = Get-LanguageDisplayName $lang
+        $item.Tag = [string]$lang.Code
+        [void]$combo.Items.Add($item)
+
+        if ($lang.Code -ieq $selectedCode) {
+            $combo.SelectedItem = $item
+        }
+    }
+
+    if ($null -eq $combo.SelectedItem -and $combo.Items.Count -gt 0) {
+        $combo.SelectedIndex = 0
+    }
+}
+
+function Get-PzSelectedLanguage($combo) {
+    if ($null -eq $combo -or $null -eq $combo.SelectedItem) { return $null }
+    return Get-LanguageByCode ([string]$combo.SelectedItem.Tag)
+}
+
+function Test-PzTranslateRoot([string]$path) {
+    if ([string]::IsNullOrWhiteSpace($path)) { return $false }
+    return Test-Path -LiteralPath (Join-Path $path "media\lua\shared\Translate")
+}
+
+function Get-PzVersionSortValue([string]$name) {
+    try {
+        if ($name -match '^\d+(\.\d+){0,3}$') {
+            return [version]$name
+        }
+    } catch {}
+    return [version]"0.0"
+}
+
+function Get-PzWorkshopRoots {
+    $roots = New-Object System.Collections.ArrayList
+    $steamCandidates = New-Object System.Collections.ArrayList
+
+    try {
+        $steamPath = (Get-ItemProperty -Path "HKCU:\Software\Valve\Steam" -ErrorAction Stop).SteamPath
+        if ($steamPath) { [void]$steamCandidates.Add($steamPath) }
+    } catch {}
+
+    foreach ($envPath in @($env:ProgramFiles, ${env:ProgramFiles(x86)})) {
+        if (-not [string]::IsNullOrWhiteSpace($envPath)) {
+            $candidate = Join-Path $envPath "Steam"
+            if (Test-Path -LiteralPath $candidate) { [void]$steamCandidates.Add($candidate) }
+        }
+    }
+
+    $libraries = New-Object System.Collections.ArrayList
+    foreach ($steam in @($steamCandidates | Select-Object -Unique)) {
+        if (-not (Test-Path -LiteralPath $steam)) { continue }
+        [void]$libraries.Add($steam)
+
+        $vdf = Join-Path $steam "steamapps\libraryfolders.vdf"
+        if (Test-Path -LiteralPath $vdf) {
+            try {
+                foreach ($line in Get-Content -LiteralPath $vdf -Encoding UTF8 -ErrorAction SilentlyContinue) {
+                    if ($line -match '"path"\s+"([^"]+)"') {
+                        $lib = [string]$Matches[1]
+                        $lib = $lib -replace '\\\\','\'
+                        if (Test-Path -LiteralPath $lib) { [void]$libraries.Add($lib) }
+                    }
+                }
+            } catch {}
+        }
+    }
+
+    foreach ($lib in @($libraries | Select-Object -Unique)) {
+        $workshop = Join-Path $lib "steamapps\workshop\content\108600"
+        if (Test-Path -LiteralPath $workshop) {
+            [void]$roots.Add($workshop)
+        }
+    }
+
+    return @($roots | Select-Object -Unique)
+}
+
+function Get-PzLocalModsRoot {
+    $candidate = Join-Path $env:USERPROFILE "Zomboid\mods"
+    if (Test-Path -LiteralPath $candidate) { return $candidate }
+    return $null
+}
+
+
+function Get-PzModInfo([string]$modPath, [string]$fallbackName="", [string]$workshopId="") {
+    $name = $fallbackName
+    $id = ""
+    $version = ""
+    $infoCandidates = @((Join-Path $modPath "mod.info"))
+
+    try {
+        $latestVersion = Get-ChildItem -LiteralPath $modPath -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^\d+(\.\d+){0,3}$' } |
+            Sort-Object @{ Expression = { Get-PzVersionSortValue $_.Name }; Descending = $true } |
+            Select-Object -First 1
+        if ($latestVersion) {
+            $infoCandidates += (Join-Path $latestVersion.FullName "mod.info")
+            $version = [string]$latestVersion.Name
+        }
+    } catch {}
+
+    foreach ($info in $infoCandidates | Select-Object -Unique) {
+        if (-not (Test-Path -LiteralPath $info)) { continue }
+        try {
+            foreach ($line in Get-Content -LiteralPath $info -Encoding UTF8 -ErrorAction SilentlyContinue) {
+                if ($line -match '^\s*name\s*=\s*(.+?)\s*$') {
+                    $name = [string]$Matches[1]
+                } elseif ($line -match '^\s*id\s*=\s*(.+?)\s*$') {
+                    $id = [string]$Matches[1]
+                }
+            }
+        } catch {}
+        break
+    }
+
+    if ([string]::IsNullOrWhiteSpace($name)) {
+        $name = Split-Path $modPath -Leaf
+    }
+
+    $translationRoots = @(Find-PzModContentRoots $modPath)
+    $hasLocalization = ($translationRoots.Count -gt 0)
+
+    $baseDisplay = if ([string]::IsNullOrWhiteSpace($workshopId)) {
+        if ([string]::IsNullOrWhiteSpace($id)) { $name } else { "$name [$id]" }
+    } else {
+        "$name [Workshop $workshopId]"
+    }
+
+    $statusSuffix = if ($hasLocalization) { " [LOC OK]" } else { " [NO LOC]" }
+
+    return [pscustomobject]@{
+        Name = $name
+        ModId = $id
+        WorkshopId = $workshopId
+        Version = $version
+        Path = $modPath
+        HasLocalization = $hasLocalization
+        TranslationRoots = $translationRoots.Count
+        Display = "$baseDisplay$statusSuffix"
+    }
+}
+
+function Find-PzInstalledMods {
+    $mods = New-Object System.Collections.ArrayList
+    $seen = @{}
+
+    function Add-DetectedPzMod([string]$path, [string]$fallbackName, [string]$workshopId) {
+        if ([string]::IsNullOrWhiteSpace($path) -or -not (Test-Path -LiteralPath $path -PathType Container)) { return }
+
+        try { $full = [System.IO.Path]::GetFullPath($path) } catch { $full = $path }
+        $key = $full.ToLowerInvariant()
+        if ($seen.ContainsKey($key)) { return }
+        $seen[$key] = $true
+
+        [void]$mods.Add((Get-PzModInfo $path $fallbackName $workshopId))
+    }
+
+    $localRoot = Get-PzLocalModsRoot
+    if ($localRoot) {
+        foreach ($dir in Get-ChildItem -LiteralPath $localRoot -Directory -ErrorAction SilentlyContinue) {
+            Add-DetectedPzMod $dir.FullName $dir.Name ""
+        }
+    }
+
+    foreach ($workshopRoot in @(Get-PzWorkshopRoots)) {
+        foreach ($item in Get-ChildItem -LiteralPath $workshopRoot -Directory -ErrorAction SilentlyContinue) {
+            $wid = [string]$item.Name
+            $itemMods = Join-Path $item.FullName "mods"
+
+            if (Test-Path -LiteralPath $itemMods) {
+                foreach ($modDir in Get-ChildItem -LiteralPath $itemMods -Directory -ErrorAction SilentlyContinue) {
+                    Add-DetectedPzMod $modDir.FullName $modDir.Name $wid
+                }
+            } else {
+                Add-DetectedPzMod $item.FullName $item.Name $wid
+            }
+        }
+    }
+
+    return @($mods | Sort-Object Name,WorkshopId)
+}
+
+function Refresh-PzDetectedModsCombo {
+    if ($null -eq $cmbPzDetectedMods) { return }
+    $cmbPzDetectedMods.Items.Clear()
+
+    foreach ($mod in @($script:PzDetectedMods)) {
+        $item = New-Object System.Windows.Controls.ComboBoxItem
+        $item.Content = [string]$mod.Display
+        $item.Tag = [string]$mod.Path
+        $item.ToolTip = if ($mod.HasLocalization) {
+            "$($mod.Path)`nLocalization roots: $($mod.TranslationRoots)"
+        } else {
+            "$($mod.Path)`nNo supported localization files detected."
+        }
+        [void]$cmbPzDetectedMods.Items.Add($item)
+    }
+
+    if ($cmbPzDetectedMods.Items.Count -gt 0) {
+        $cmbPzDetectedMods.SelectedIndex = 0
+    }
+}
+
+function Find-PzKnownModRoots {
+    $roots = New-Object System.Collections.ArrayList
+
+    $local = Get-PzLocalModsRoot
+    if ($local) {
+        [void]$roots.Add([pscustomobject]@{ Path=$local; Type="Local" })
+    }
+
+    foreach ($w in @(Get-PzWorkshopRoots)) {
+        [void]$roots.Add([pscustomobject]@{ Path=$w; Type="Workshop" })
+    }
+
+    return @($roots)
+}
+
+function Find-PzModContentRoots([string]$selectedPath) {
+    if ([string]::IsNullOrWhiteSpace($selectedPath) -or -not (Test-Path -LiteralPath $selectedPath)) {
+        return @()
+    }
+
+    $found = New-Object System.Collections.ArrayList
+    $seen = @{}
+
+    function Add-PzRoot([string]$candidate, [string]$label) {
+        if ([string]::IsNullOrWhiteSpace($candidate)) { return }
+        try { $candidate = [System.IO.Path]::GetFullPath($candidate) } catch {}
+        if (-not (Test-PzTranslateRoot $candidate)) { return }
+
+        $key = $candidate.ToLowerInvariant()
+        if ($seen.ContainsKey($key)) { return }
+        $seen[$key] = $true
+
+        [void]$found.Add([pscustomobject]@{
+            Path = $candidate
+            Label = $label
+        })
+    }
+
+    function Inspect-PzModFolder([string]$modPath, [string]$labelPrefix) {
+        if (-not (Test-Path -LiteralPath $modPath -PathType Container)) { return }
+
+        Add-PzRoot $modPath $labelPrefix
+
+        foreach ($v in @(
+            Get-ChildItem -LiteralPath $modPath -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^\d+(\.\d+){0,3}$' } |
+            Sort-Object @{ Expression = { Get-PzVersionSortValue $_.Name }; Descending = $true }
+        )) {
+            Add-PzRoot $v.FullName "$labelPrefix/$($v.Name)"
+        }
+    }
+
+    # Exact mod folder.
+    Inspect-PzModFolder $selectedPath "root"
+
+    # Workshop item or other package with mods/<mod-name>/...
+    $modsRoot = Join-Path $selectedPath "mods"
+    if (Test-Path -LiteralPath $modsRoot) {
+        foreach ($modDir in Get-ChildItem -LiteralPath $modsRoot -Directory -ErrorAction SilentlyContinue) {
+            Inspect-PzModFolder $modDir.FullName $modDir.Name
+        }
+    }
+
+    # Root containing many local mods OR Steam Workshop content/108600.
+    foreach ($direct in Get-ChildItem -LiteralPath $selectedPath -Directory -ErrorAction SilentlyContinue) {
+        if ($direct.Name -eq "mods") { continue }
+
+        Inspect-PzModFolder $direct.FullName $direct.Name
+
+        if ($direct.Name -match '^\d+$') {
+            $itemMods = Join-Path $direct.FullName "mods"
+            if (Test-Path -LiteralPath $itemMods) {
+                foreach ($modDir in Get-ChildItem -LiteralPath $itemMods -Directory -ErrorAction SilentlyContinue) {
+                    Inspect-PzModFolder $modDir.FullName "$($direct.Name)/$($modDir.Name)"
+                }
+            }
+        }
+    }
+
+    return @($found)
+}
+
+function ConvertFrom-PzJsonNode([object]$node, [string]$prefix="", [string]$fileName="") {
+    $rows = New-Object System.Collections.ArrayList
+    if ($null -eq $node) { return @() }
+
+    if ($node -is [System.Collections.IDictionary]) {
+        foreach ($key in $node.Keys) {
+            $childPrefix = if ([string]::IsNullOrWhiteSpace($prefix)) { [string]$key } else { "$prefix.$key" }
+            $childRows = @(ConvertFrom-PzJsonNode $node[$key] $childPrefix $fileName)
+            foreach ($r in $childRows) { [void]$rows.Add($r) }
+        }
+        return @($rows)
+    }
+
+    if ($node -is [pscustomobject]) {
+        foreach ($prop in $node.PSObject.Properties) {
+            $childPrefix = if ([string]::IsNullOrWhiteSpace($prefix)) { [string]$prop.Name } else { "$prefix.$($prop.Name)" }
+            $childRows = @(ConvertFrom-PzJsonNode $prop.Value $childPrefix $fileName)
+            foreach ($r in $childRows) { [void]$rows.Add($r) }
+        }
+        return @($rows)
+    }
+
+    if (($node -is [System.Collections.IEnumerable]) -and -not ($node -is [string])) {
+        $i = 0
+        foreach ($item in $node) {
+            $childPrefix = "$prefix[$i]"
+            $childRows = @(ConvertFrom-PzJsonNode $item $childPrefix $fileName)
+            foreach ($r in $childRows) { [void]$rows.Add($r) }
+            $i++
+        }
+        return @($rows)
+    }
+
+    # Only string leaf values are translatable. Numbers/bools/null remain structure.
+    if ($node -is [string]) {
+        [void]$rows.Add([pscustomobject]@{
+            Key = $prefix
+            Value = [string]$node
+            File = $fileName
+        })
+    }
+
+    return @($rows)
+}
+
+function Read-PzJsonTranslationFile([string]$path) {
+    if (-not (Test-Path -LiteralPath $path)) { return @() }
+
+    try {
+        $utf8Strict = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false, $true)
+        $raw = [System.IO.File]::ReadAllText($path, $utf8Strict)
+    } catch {
+        $raw = Get-Content -LiteralPath $path -Raw -Encoding UTF8
+    }
+
+    if ([string]::IsNullOrWhiteSpace($raw)) { return @() }
+
+    try {
+        # Windows PowerShell 5.1 ConvertFrom-Json treats object keys
+        # case-insensitively and rejects valid PZ files with names such as
+        # Farming_Lemongrass and Farming_LemonGrass.
+        Add-Type -AssemblyName System.Web.Extensions -ErrorAction SilentlyContinue
+        $serializer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+        $serializer.MaxJsonLength = [int]::MaxValue
+        $serializer.RecursionLimit = 512
+        $obj = $serializer.DeserializeObject($raw)
+    } catch {
+        throw "Invalid Project Zomboid JSON translation file: $path`n$($_.Exception.Message)"
+    }
+
+    return @(ConvertFrom-PzJsonNode $obj "" ([System.IO.Path]::GetFileName($path)))
+}
+
+function Get-PzTranslationFiles([string]$folder) {
+    if (-not (Test-Path -LiteralPath $folder)) { return @() }
+
+    $all = New-Object System.Collections.ArrayList
+    foreach ($f in Get-ChildItem -LiteralPath $folder -File -Recurse -ErrorAction SilentlyContinue) {
+        if ($f.Extension -ieq ".txt" -or $f.Extension -ieq ".json") {
+            [void]$all.Add($f)
+        }
+    }
+    return @($all)
+}
+
+
+function Protect-PzMarkup([string]$text) {
+    if ($null -eq $text) { return [pscustomobject]@{ Text=""; Map=@{} } }
+
+    $map = @{}
+    $index = 0
+    $protected = [regex]::Replace(
+        $text,
+        '<[^<>]+>',
+        {
+            param($m)
+            $token = "__PZTAG$index`__"
+            $map[$token] = [string]$m.Value
+            $script:__PzTmpIndex = $index + 1
+            $index++
+            return $token
+        }
+    )
+
+    return [pscustomobject]@{
+        Text = $protected
+        Map = $map
+    }
+}
+
+function Restore-PzMarkup([string]$translated, $map) {
+    if ($null -eq $translated) { $translated = "" }
+    $result = [string]$translated
+
+    foreach ($key in $map.Keys) {
+        $result = $result.Replace([string]$key, [string]$map[$key])
+    }
+
+    # Some providers may add spaces around token fragments. Repair conservative variants.
+    foreach ($key in $map.Keys) {
+        $compact = [regex]::Escape([string]$key)
+        $result = [regex]::Replace($result, $compact, [string]$map[$key])
+    }
+
+    return $result
+}
+
+function Test-PzMarkupIntegrity([string]$source, [string]$translation) {
+    $srcTags = @([regex]::Matches([string]$source, '<[^<>]+>') | ForEach-Object { $_.Value })
+    $dstTags = @([regex]::Matches([string]$translation, '<[^<>]+>') | ForEach-Object { $_.Value })
+
+    if ($translation -match '__MTTPH\d+__' -or $translation -match '__PZTAG\d+__') {
+        return $false
+    }
+
+    if ($srcTags.Count -ne $dstTags.Count) { return $false }
+
+    for ($i=0; $i -lt $srcTags.Count; $i++) {
+        if ([string]$srcTags[$i] -cne [string]$dstTags[$i]) { return $false }
+    }
+    return $true
+}
+
+function Translate-PzText([string]$text, [string]$sourceCode, [string]$targetCode) {
+    $pz = Protect-PzMarkup $text
+    $translated = Translate-Configured ([string]$pz.Text) $sourceCode $targetCode
+    $restored = Restore-PzMarkup ([string]$translated) $pz.Map
+
+    if (-not (Test-PzMarkupIntegrity $text $restored)) {
+        throw $(if ($script:UiLanguage -eq "en") {
+            "Project Zomboid markup validation failed after translation."
+        } else {
+            "Walidacja znaczników Project Zomboid po tłumaczeniu nie powiodła się."
+        })
+    }
+
+    return $restored
+}
+
+function ConvertFrom-PzQuotedValue([string]$value) {
+    if ($null -eq $value) { return "" }
+    return $value.Replace('\"','"').Replace("\\'","'").Replace('\\\\','\\')
+}
+
+function Read-PzTranslationFolder([string]$contentRoot, [string]$rootLabel, [string]$pzCode, [string]$role) {
+    $rows = New-Object System.Collections.ArrayList
+    $folder = Join-Path $contentRoot "media\lua\shared\Translate\$pzCode"
+    if (-not (Test-Path -LiteralPath $folder)) { return @() }
+
+    foreach ($f in @(Get-PzTranslationFiles $folder)) {
+        # Legacy Recorded_Media TXT remains a special generated format.
+        if ($f.Name -like "Recorded_Media_*" -and $f.Extension -ieq ".txt") { continue }
+
+        if ($f.Extension -ieq ".json") {
+            foreach ($jr in @(Read-PzJsonTranslationFile $f.FullName)) {
+                [void]$rows.Add([pscustomobject]@{
+                    Root = $rootLabel
+                    File = [System.IO.Path]::GetFileName($f.FullName)
+                    Key = [string]$jr.Key
+                    Source = if ($role -eq "Source") { [string]$jr.Value } else { "" }
+                    Translation = if ($role -eq "Target") { [string]$jr.Value } else { "" }
+                    Line = 0
+                    Format = "JSON"
+                })
+            }
+            continue
+        }
+
+        $lineNo = 0
+        foreach ($line in Get-Content -LiteralPath $f.FullName -Encoding UTF8 -ErrorAction SilentlyContinue) {
+            $lineNo++
+            if ([string]::IsNullOrWhiteSpace($line)) { continue }
+
+            $key = $null
+            $value = $null
+
+            if ($line -match '^\s*([A-Za-z0-9_.\-\[\]]+)\s*=\s*"((?:\\.|[^"])*)"\s*,?\s*$') {
+                $key = [string]$Matches[1]
+                $value = ConvertFrom-PzQuotedValue ([string]$Matches[2])
+            } elseif ($line -match "^\s*([A-Za-z0-9_.\-\[\]]+)\s*=\s*'((?:\\.|[^'])*)'\s*,?\s*$") {
+                $key = [string]$Matches[1]
+                $value = ConvertFrom-PzQuotedValue ([string]$Matches[2])
+            }
+
+            if ([string]::IsNullOrWhiteSpace($key)) { continue }
+
+            [void]$rows.Add([pscustomobject]@{
+                Root = $rootLabel
+                File = [System.IO.Path]::GetFileName($f.FullName)
+                Key = $key
+                Source = if ($role -eq "Source") { $value } else { "" }
+                Translation = if ($role -eq "Target") { $value } else { "" }
+                Line = $lineNo
+                Format = "TXT"
+            })
+        }
+    }
+
+    return @($rows)
+}
+
+function Get-PzEntryIdentity($entry) {
+    return "$($entry.Root)|$($entry.File)|$($entry.Key)"
+}
+
+function Refresh-PzGrid {
+    if ($null -eq $pzGrid) { return }
+    $pzGrid.ItemsSource = $null
+    $pzGrid.ItemsSource = @($script:PzEntries)
+    if ($null -ne $lblPzCount) {
+        $lblPzCount.Content = if ($script:UiLanguage -eq "en") {
+            "Entries: $($script:PzEntries.Count)"
+        } else {
+            "Wpisy: $($script:PzEntries.Count)"
+        }
+    }
+}
+
+function Scan-PzMod([string]$selectedPath) {
+    if (Test-IsPzToolkitTranslationMod $selectedPath) {
+        return Scan-PzToolkitTranslationMod $selectedPath
+    }
+
+    $script:PzEditingTranslationPath = ""
+    $sourceLang = Get-PzSelectedLanguage $cmbPzSourceLang
+    $targetLang = Get-PzSelectedLanguage $cmbPzTargetLang
+    if ($null -eq $sourceLang -or $null -eq $targetLang) { return $null }
+
+    if ($sourceLang.Code -ieq $targetLang.Code) {
+        throw $(if ($script:UiLanguage -eq "en") {
+            "Source and target language must be different."
+        } else {
+            "Jezyk zrodlowy i docelowy musza byc rozne."
+        })
+    }
+
+    $srcCode = Get-PzLanguageCode ([string]$sourceLang.Code)
+    $dstCode = Get-PzLanguageCode ([string]$targetLang.Code)
+
+    $roots = @(Find-PzModContentRoots $selectedPath)
+    if ($roots.Count -eq 0) {
+        throw $(if ($script:UiLanguage -eq "en") {
+            "No Project Zomboid translation root was found. Expected media/lua/shared/Translate, optionally inside a B42 version folder."
+        } else {
+            "Nie znaleziono katalogu tlumaczen Project Zomboid. Oczekiwano media/lua/shared/Translate, opcjonalnie w wersjonowanym folderze B42."
+        })
+    }
+
+    $result = New-Object System.Collections.ArrayList
+    $matched = 0
+    $targetCount = 0
+
+    foreach ($root in $roots) {
+        $sourceRows = @(Read-PzTranslationFolder $root.Path $root.Label $srcCode "Source")
+        $targetRows = @(Read-PzTranslationFolder $root.Path $root.Label $dstCode "Target")
+        $targetCount += $targetRows.Count
+
+        $targetMap = @{}
+        foreach ($r in $targetRows) {
+            $targetMap[(Get-PzEntryIdentity $r).ToLowerInvariant()] = [string]$r.Translation
+        }
+
+        foreach ($r in $sourceRows) {
+            $id = (Get-PzEntryIdentity $r).ToLowerInvariant()
+            if ($targetMap.ContainsKey($id)) {
+                $r.Translation = [string]$targetMap[$id]
+                $matched++
+            }
+            [void]$result.Add($r)
+        }
+    }
+
+    $script:PzEntries = @($result)
+    $script:PzContentRoots = @($roots)
+    Refresh-PzGrid
+
+    if ($pzGrid.Columns.Count -ge 5) {
+        $pzGrid.Columns[3].Header = [string]$sourceLang.NativeName
+        $pzGrid.Columns[4].Header = [string]$targetLang.NativeName
+    }
+
+    $status = if ($script:UiLanguage -eq "en") {
+        "Scan complete. Roots: $($roots.Count), source entries: $($result.Count), target entries: $targetCount, matched: $matched. TXT + JSON."
+    } else {
+        "Skan zakonczony. Rooty: $($roots.Count), wpisy zrodlowe: $($result.Count), wpisy docelowe: $targetCount, dopasowane: $matched. TXT + JSON."
+    }
+    $txtPzStatus.Text = $status
+
+    return [pscustomobject]@{
+        Roots = $roots.Count
+        SourceEntries = $result.Count
+        TargetEntries = $targetCount
+        Matched = $matched
+    }
+}
+
+
+function Get-PzTargetFolderCode {
+    $lang = Get-PzSelectedLanguage $cmbPzTargetLang
+    if ($null -eq $lang) { return "PL" }
+    return Get-PzLanguageCode ([string]$lang.Code)
+}
+
+
+function Get-PzTranslationMetadata([string]$modPath) {
+    if ([string]::IsNullOrWhiteSpace($modPath)) { return $null }
+    $metaPath = Join-Path $modPath "ModTranslationToolkit.json"
+    if (-not (Test-Path -LiteralPath $metaPath)) { return $null }
+
+    try {
+        return Get-Content -LiteralPath $metaPath -Raw -Encoding UTF8 | ConvertFrom-Json
+    } catch {
+        return $null
+    }
+}
+
+function Test-IsPzToolkitTranslationMod([string]$modPath) {
+    $meta = Get-PzTranslationMetadata $modPath
+    return ($null -ne $meta -and -not [string]::IsNullOrWhiteSpace([string]$meta.OriginalModId))
+}
+
+function Resolve-PzOriginalModPathFromMetadata($meta) {
+    if ($null -eq $meta) { return $null }
+
+    $savedPath = [string]$meta.OriginalPath
+    if (-not [string]::IsNullOrWhiteSpace($savedPath) -and (Test-Path -LiteralPath $savedPath)) {
+        return $savedPath
+    }
+
+    $wantedWorkshop = [string]$meta.OriginalWorkshopId
+    $wantedModId = [string]$meta.OriginalModId
+
+    foreach ($m in @($script:PzDetectedMods)) {
+        if (-not [string]::IsNullOrWhiteSpace($wantedWorkshop) -and [string]$m.WorkshopId -eq $wantedWorkshop) {
+            return [string]$m.Path
+        }
+        if (-not [string]::IsNullOrWhiteSpace($wantedModId) -and [string]$m.ModId -eq $wantedModId) {
+            return [string]$m.Path
+        }
+    }
+
+    return $null
+}
+
+function Scan-PzToolkitTranslationMod([string]$translationModPath) {
+    $meta = Get-PzTranslationMetadata $translationModPath
+    if ($null -eq $meta) {
+        throw "Missing ModTranslationToolkit.json."
+    }
+
+    $originalPath = Resolve-PzOriginalModPathFromMetadata $meta
+    if ([string]::IsNullOrWhiteSpace($originalPath) -or -not (Test-Path -LiteralPath $originalPath)) {
+        throw $(if ($script:UiLanguage -eq "en") {
+            "The original Project Zomboid mod could not be found. Detect installed mods again or restore the original mod."
+        } else {
+            "Nie znaleziono oryginalnego moda Project Zomboid. Wykryj ponownie zainstalowane mody albo przywróć oryginalny mod."
+        })
+    }
+
+    $sourceLang = Get-PzSelectedLanguage $cmbPzSourceLang
+    $targetLang = Get-PzSelectedLanguage $cmbPzTargetLang
+    if ($null -eq $sourceLang -or $null -eq $targetLang) { return $null }
+
+    $srcCode = Get-PzLanguageCode ([string]$sourceLang.Code)
+    $dstCode = Get-PzLanguageCode ([string]$targetLang.Code)
+
+    $sourceRoots = @(Find-PzModContentRoots $originalPath)
+    $targetRoots = @(Find-PzModContentRoots $translationModPath)
+
+    if ($sourceRoots.Count -eq 0) {
+        throw "Original mod has no supported Project Zomboid translation roots."
+    }
+
+    $targetByLabel = @{}
+    foreach ($r in $targetRoots) {
+        $targetByLabel[[string]$r.Label] = $r
+    }
+
+    $result = New-Object System.Collections.ArrayList
+    $targetCount = 0
+    $matched = 0
+
+    foreach ($sourceRoot in $sourceRoots) {
+        $sourceRows = @(Read-PzTranslationFolder $sourceRoot.Path $sourceRoot.Label $srcCode "Source")
+
+        $targetRows = @()
+        if ($targetByLabel.ContainsKey([string]$sourceRoot.Label)) {
+            $targetRoot = $targetByLabel[[string]$sourceRoot.Label]
+            $targetRows = @(Read-PzTranslationFolder $targetRoot.Path $targetRoot.Label $dstCode "Target")
+        }
+        $targetCount += $targetRows.Count
+
+        $targetMap = @{}
+        foreach ($r in $targetRows) {
+            $targetMap[(Get-PzEntryIdentity $r).ToLowerInvariant()] = [string]$r.Translation
+        }
+
+        foreach ($r in $sourceRows) {
+            $id = (Get-PzEntryIdentity $r).ToLowerInvariant()
+            if ($targetMap.ContainsKey($id)) {
+                $r.Translation = [string]$targetMap[$id]
+                $matched++
+            }
+            [void]$result.Add($r)
+        }
+    }
+
+    $script:PzEntries = @($result)
+    $script:PzContentRoots = @($sourceRoots)
+    $script:PzEditingTranslationPath = $translationModPath
+
+    Refresh-PzGrid
+
+    if ($pzGrid.Columns.Count -ge 5) {
+        $pzGrid.Columns[3].Header = [string]$sourceLang.NativeName
+        $pzGrid.Columns[4].Header = [string]$targetLang.NativeName
+    }
+
+    $txtPzStatus.Text = if ($script:UiLanguage -eq "en") {
+        "Opened Toolkit translation. Source: $($meta.OriginalName) | source entries: $($result.Count) | target entries: $targetCount | matched: $matched"
+    } else {
+        "Otwarto translację Toolkita. Źródło: $($meta.OriginalName) | wpisy źródłowe: $($result.Count) | wpisy targetu: $targetCount | dopasowane: $matched"
+    }
+
+    return [pscustomobject]@{
+        Roots = $sourceRoots.Count
+        SourceEntries = $result.Count
+        TargetEntries = $targetCount
+        Matched = $matched
+        OriginalPath = $originalPath
+    }
+}
+
+function Get-PzCurrentDetectedModInfo {
+    $path = [string]$txtPzModPath.Text
+    if ([string]::IsNullOrWhiteSpace($path)) { return $null }
+
+    foreach ($m in @($script:PzDetectedMods)) {
+        if ([string]$m.Path -ieq $path) { return $m }
+    }
+
+    $workshopId = ""
+    try {
+        if ($path -match '[\\/]workshop[\\/]content[\\/]108600[\\/]([0-9]+)[\\/]') {
+            $workshopId = [string]$Matches[1]
+        }
+    } catch {}
+
+    return Get-PzModInfo $path (Split-Path $path -Leaf) $workshopId
+}
+
+
+function Find-PzModInfoFiles([string]$sourceModPath) {
+    if ([string]::IsNullOrWhiteSpace($sourceModPath) -or -not (Test-Path -LiteralPath $sourceModPath)) {
+        return @()
+    }
+
+    $files = New-Object System.Collections.ArrayList
+
+    foreach ($f in Get-ChildItem -LiteralPath $sourceModPath -File -Filter "mod.info" -Recurse -ErrorAction SilentlyContinue) {
+        # Ignore accidental nested copies outside sensible B42 roots.
+        $rel = $f.FullName.Substring($sourceModPath.TrimEnd('\').Length).TrimStart('\')
+        if ($rel -match '^(mod\.info|common\\mod\.info|\d+(\.\d+){0,3}\\mod\.info)$') {
+            [void]$files.Add([pscustomobject]@{
+                Path = $f.FullName
+                RelativePath = $rel
+                Root = if ($rel -eq "mod.info") { "" } else { Split-Path $rel -Parent }
+            })
+        }
+    }
+
+    return @($files)
+}
+
+function Get-PzPreferredModInfo([string]$sourceModPath) {
+    $files = @(Find-PzModInfoFiles $sourceModPath)
+    if ($files.Count -eq 0) { return $null }
+
+    # Prefer newest numeric B42 version, then root mod.info, then common.
+    $numeric = @(
+        $files | Where-Object { $_.Root -match '^\d+(\.\d+){0,3}$' } |
+        Sort-Object @{ Expression = {
+            try { [version]$_.Root } catch { [version]"0.0" }
+        }; Descending = $true }
+    )
+    if ($numeric.Count -gt 0) { return $numeric[0] }
+
+    $rootInfo = $files | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.Root) } | Select-Object -First 1
+    if ($rootInfo) { return $rootInfo }
+
+    return $files | Select-Object -First 1
+}
+
+function Copy-PzStructureSkeleton([string]$sourceModPath, [string]$outMod) {
+    # Copy metadata/container structure only. Do not copy gameplay files.
+    $infoFiles = @(Find-PzModInfoFiles $sourceModPath)
+
+    foreach ($info in $infoFiles) {
+        $dest = Join-Path $outMod $info.RelativePath
+        New-Item -ItemType Directory -Path (Split-Path $dest -Parent) -Force | Out-Null
+        Copy-Item -LiteralPath $info.Path -Destination $dest -Force
+    }
+
+    # Preserve source poster/preview only as source for generated poster.
+    foreach ($candidate in @("poster.png","preview.png")) {
+        $src = Join-Path $sourceModPath $candidate
+        if (Test-Path -LiteralPath $src) {
+            Copy-Item -LiteralPath $src -Destination (Join-Path $outMod $candidate) -Force
+            break
+        }
+    }
+
+    # Preserve empty version/common roots if present so the layout mirrors source.
+    foreach ($dir in Get-ChildItem -LiteralPath $sourceModPath -Directory -ErrorAction SilentlyContinue) {
+        if ($dir.Name -eq "common" -or $dir.Name -match '^\d+(\.\d+){0,3}$') {
+            New-Item -ItemType Directory -Path (Join-Path $outMod $dir.Name) -Force | Out-Null
+        }
+    }
+}
+
+function Update-PzModInfoFile(
+    [string]$path,
+    [string]$displayName,
+    [string]$translationId,
+    [string]$originalModId,
+    [string]$targetName
+) {
+    $lines = @()
+    if (Test-Path -LiteralPath $path) {
+        $lines = @(Get-Content -LiteralPath $path -Encoding UTF8)
+    }
+
+    $output = New-Object System.Collections.ArrayList
+    $seenName = $false
+    $seenId = $false
+    $seenPoster = $false
+    $seenRequire = $false
+
+    foreach ($line in $lines) {
+        if ($line -match '^\s*name\s*=') {
+            if (-not $seenName) {
+                [void]$output.Add("name=$displayName")
+                $seenName = $true
+            }
+            continue
+        }
+
+        if ($line -match '^\s*id\s*=') {
+            if (-not $seenId) {
+                [void]$output.Add("id=$translationId")
+                $seenId = $true
+            }
+            continue
+        }
+
+        if ($line -match '^\s*description\s*=') {
+            # Drop every source description line. A single clean translation
+            # description is added below so inherited multiline descriptions
+            # cannot repeat our suffix several times.
+            continue
+        }
+
+        if ($line -match '^\s*poster\s*=') {
+            if (-not $seenPoster) {
+                [void]$output.Add("poster=poster.png")
+                $seenPoster = $true
+            }
+            continue
+        }
+
+        if ($line -match '^\s*require\s*=') {
+            if (-not $seenRequire -and -not [string]::IsNullOrWhiteSpace($originalModId)) {
+                [void]$output.Add("require=$originalModId")
+                $seenRequire = $true
+            }
+            continue
+        }
+
+        # Do not inherit gameplay/package declarations from the source mod.
+        if ($line -match '^\s*(pack|tiledef|versionMin|versionMax)\s*=') {
+            continue
+        }
+
+        [void]$output.Add($line)
+    }
+
+    if (-not $seenName) { [void]$output.Add("name=$displayName") }
+    if (-not $seenId) { [void]$output.Add("id=$translationId") }
+
+    # Always write exactly one clean description.
+    [void]$output.Add("description=$targetName translation for the original mod. Created with Mod Translation Toolkit.")
+
+    if (-not $seenPoster) { [void]$output.Add("poster=poster.png") }
+    if (-not $seenRequire -and -not [string]::IsNullOrWhiteSpace($originalModId)) {
+        [void]$output.Add("require=$originalModId")
+    }
+
+    New-Item -ItemType Directory -Path (Split-Path $path -Parent) -Force | Out-Null
+    [System.IO.File]::WriteAllLines(
+        $path,
+        [string[]]$output,
+        (New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false))
+    )
+}
+
+function Install-PzPosterBesideModInfos([string]$outMod, [string]$rootPoster) {
+    if (-not (Test-Path -LiteralPath $rootPoster)) { return }
+
+    foreach ($info in @(Find-PzModInfoFiles $outMod)) {
+        $dir = Split-Path $info.Path -Parent
+        $dest = Join-Path $dir "poster.png"
+
+        if ($dest -ine $rootPoster) {
+            Copy-Item -LiteralPath $rootPoster -Destination $dest -Force
+        }
+    }
+}
+
+
+function Get-PzLocalInstallRoot {
+    $root = Join-Path $env:USERPROFILE "Zomboid\mods"
+    if (-not (Test-Path -LiteralPath $root)) {
+        try { New-Item -ItemType Directory -Path $root -Force | Out-Null } catch {}
+    }
+    return $root
+}
+
+function Get-PzBuildVersionRoot([string]$sourceModPath) {
+    # Preserve the newest numeric B42 folder if one is present.
+    try {
+        $latest = Get-ChildItem -LiteralPath $sourceModPath -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^\d+(\.\d+){0,3}$' } |
+            Sort-Object @{ Expression = { Get-PzVersionSortValue $_.Name }; Descending = $true } |
+            Select-Object -First 1
+
+        if ($latest) { return [string]$latest.Name }
+    } catch {}
+
+    # If the localization lives in common/, keep common as the shared root.
+    if (Test-Path -LiteralPath (Join-Path $sourceModPath "common")) { return "common" }
+
+    # B42-safe fallback.
+    return "42"
+}
+
+function Get-PzTranslationBuildId([string]$originalId, [string]$targetCode) {
+    $creator = Get-ToolkitCreatorId
+    $creator = ($creator -replace '[^a-zA-Z0-9_.-]', '').ToLowerInvariant()
+    if ([string]::IsNullOrWhiteSpace($creator)) { $creator = "mtt" }
+
+    $base = $originalId
+    if ([string]::IsNullOrWhiteSpace($base)) { $base = "projectzomboidmod" }
+    $base = ($base -replace '[^a-zA-Z0-9_.-]', '').ToLowerInvariant()
+
+    return "$base.translation.$creator.$($targetCode.ToLowerInvariant())"
+}
+
+function Convert-PzJsonForOutput([object]$node, [string]$prefix, $translationMap) {
+    if ($null -eq $node) { return $null }
+
+    if ($node -is [System.Collections.IDictionary]) {
+        $result = New-Object 'System.Collections.Generic.Dictionary[string,object]' ([System.StringComparer]::Ordinal)
+        foreach ($key in $node.Keys) {
+            $childPrefix = if ([string]::IsNullOrWhiteSpace($prefix)) { [string]$key } else { "$prefix.$key" }
+            $result[[string]$key] = Convert-PzJsonForOutput $node[$key] $childPrefix $translationMap
+        }
+        return $result
+    }
+
+    if (($node -is [System.Collections.IEnumerable]) -and -not ($node -is [string])) {
+        $list = New-Object System.Collections.ArrayList
+        $i = 0
+        foreach ($item in $node) {
+            $childPrefix = "$prefix[$i]"
+            [void]$list.Add((Convert-PzJsonForOutput $item $childPrefix $translationMap))
+            $i++
+        }
+        return ,$list.ToArray()
+    }
+
+    if ($node -is [string]) {
+        if ($translationMap.ContainsKey($prefix) -and
+            -not [string]::IsNullOrWhiteSpace([string]$translationMap[$prefix])) {
+            return [string]$translationMap[$prefix]
+        }
+        return [string]$node
+    }
+
+    return $node
+}
+
+function Write-PzJsonTranslationFile([string]$sourceFile, [string]$destFile, $translationMap) {
+    $utf8Strict = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false, $true)
+    $raw = [System.IO.File]::ReadAllText($sourceFile, $utf8Strict)
+
+    Add-Type -AssemblyName System.Web.Extensions -ErrorAction SilentlyContinue
+    $serializer = New-Object System.Web.Script.Serialization.JavaScriptSerializer
+    $serializer.MaxJsonLength = [int]::MaxValue
+    $serializer.RecursionLimit = 512
+
+    $obj = $serializer.DeserializeObject($raw)
+    $outObj = Convert-PzJsonForOutput $obj "" $translationMap
+    $json = $serializer.Serialize($outObj)
+
+    # Pretty-print is intentionally avoided here: JavaScriptSerializer keeps
+    # case-sensitive keys safely and Project Zomboid only needs valid UTF-8 JSON.
+    New-Item -ItemType Directory -Path (Split-Path $destFile -Parent) -Force | Out-Null
+    [System.IO.File]::WriteAllText($destFile, $json, (New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false)))
+}
+
+function Write-PzTxtTranslationFile([string]$sourceFile, [string]$destFile, $translationMap) {
+    $lines = @(Get-Content -LiteralPath $sourceFile -Encoding UTF8)
+    $out = New-Object System.Collections.ArrayList
+
+    foreach ($line in $lines) {
+        $written = $false
+
+        if ($line -match '^\s*([A-Za-z0-9_.\-\[\]]+)\s*=\s*"((?:\\.|[^"])*)"\s*,?\s*$') {
+            $key = [string]$Matches[1]
+            if ($translationMap.ContainsKey($key) -and -not [string]::IsNullOrWhiteSpace([string]$translationMap[$key])) {
+                $value = [string]$translationMap[$key]
+                $value = $value.Replace('\','\\').Replace('"','\"')
+                $indent = [regex]::Match($line,'^\s*').Value
+                $comma = if ($line.TrimEnd().EndsWith(',')) { ',' } else { '' }
+                [void]$out.Add("$indent$key = `"$value`"$comma")
+                $written = $true
+            }
+        }
+
+        if (-not $written) { [void]$out.Add($line) }
+    }
+
+    New-Item -ItemType Directory -Path (Split-Path $destFile -Parent) -Force | Out-Null
+    [System.IO.File]::WriteAllLines($destFile, [string[]]$out, (New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false)))
+}
+
+function New-PzTranslationPoster([string]$sourceModPath, [string]$destPath, [string]$targetCode) {
+    Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
+    $bmp = New-Object System.Drawing.Bitmap 256,256
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    try {
+        $g.Clear([System.Drawing.Color]::FromArgb(18,16,24))
+        $x=28; $y=58; $w=200; $h=120
+        $g.FillRectangle([System.Drawing.Brushes]::White,$x,$y,$w,[int]($h/2))
+        $g.FillRectangle([System.Drawing.Brushes]::Red,$x,$y+[int]($h/2),$w,$h-[int]($h/2))
+        $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(230,235,235,235),3)
+        $g.DrawRectangle($pen,$x,$y,$w,$h); $pen.Dispose()
+        $font = New-Object System.Drawing.Font("Segoe UI",14,[System.Drawing.FontStyle]::Bold)
+        $brush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::White)
+        $fmt = New-Object System.Drawing.StringFormat
+        $fmt.Alignment = [System.Drawing.StringAlignment]::Center
+        $rect = New-Object System.Drawing.RectangleF(18,196,220,34)
+        $g.DrawString("POLISH TRANSLATION",$font,$brush,$rect,$fmt)
+        $font.Dispose(); $brush.Dispose(); $fmt.Dispose()
+    } finally { $g.Dispose() }
+    New-Item -ItemType Directory -Path (Split-Path $destPath -Parent) -Force | Out-Null
+    $bmp.Save($destPath,[System.Drawing.Imaging.ImageFormat]::Png)
+    $bmp.Dispose()
+}
+
+function New-PzWorkshopPreview([string]$sourceImage, [string]$destPath) {
+    Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
+    $bmp = New-Object System.Drawing.Bitmap 256,256
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+    try {
+        $g.Clear([System.Drawing.Color]::Black)
+        if (Test-Path -LiteralPath $sourceImage) {
+            $img = [System.Drawing.Image]::FromFile($sourceImage)
+            try {
+                $scale=[math]::Min(256.0/$img.Width,256.0/$img.Height)
+                $w=[int]($img.Width*$scale); $h=[int]($img.Height*$scale)
+                $x=[int]((256-$w)/2); $y=[int]((256-$h)/2)
+                $g.DrawImage($img,$x,$y,$w,$h)
+            } finally { $img.Dispose() }
+        }
+        $fw=58; $fh=36; $fx=188; $fy=210
+        $g.FillRectangle([System.Drawing.Brushes]::White,$fx,$fy,$fw,[int]($fh/2))
+        $g.FillRectangle([System.Drawing.Brushes]::Red,$fx,$fy+[int]($fh/2),$fw,$fh-[int]($fh/2))
+        $pen=New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(235,20,20,20),2)
+        $g.DrawRectangle($pen,$fx,$fy,$fw,$fh); $pen.Dispose()
+        New-Item -ItemType Directory -Path (Split-Path $destPath -Parent) -Force | Out-Null
+        $bmp.Save($destPath,[System.Drawing.Imaging.ImageFormat]::Png)
+    } finally { $g.Dispose(); $bmp.Dispose() }
+}
+
+function Test-PzWorkshopStage([string]$stagePath) {
+    $issues = New-Object System.Collections.ArrayList
+
+    if (-not (Test-Path -LiteralPath (Join-Path $stagePath "Contents"))) {
+        [void]$issues.Add("Missing Contents folder")
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $stagePath "Contents\mods"))) {
+        [void]$issues.Add("Missing Contents\\mods folder")
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $stagePath "preview.png"))) {
+        [void]$issues.Add("Missing preview.png")
+    }
+    if (-not (Test-Path -LiteralPath (Join-Path $stagePath "workshop.txt"))) {
+        [void]$issues.Add("Missing workshop.txt")
+    }
+
+    $modsRoot = Join-Path $stagePath "Contents\mods"
+    if (Test-Path -LiteralPath $modsRoot) {
+        $mods = @(Get-ChildItem -LiteralPath $modsRoot -Directory -ErrorAction SilentlyContinue)
+        if ($mods.Count -eq 0) {
+            [void]$issues.Add("No mod folder inside Contents\\mods")
+        }
+
+        foreach ($m in $mods) {
+            if (-not (Test-Path -LiteralPath (Join-Path $m.FullName "mod.info"))) {
+                [void]$issues.Add("Missing root mod.info: $($m.Name)")
+            }
+
+            $versionInfos = @(Get-ChildItem -LiteralPath $m.FullName -Filter "mod.info" -File -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { $_.FullName -ne (Join-Path $m.FullName "mod.info") })
+            if ($versionInfos.Count -eq 0) {
+                [void]$issues.Add("Missing versioned mod.info: $($m.Name)")
+            }
+        }
+    }
+
+    return @($issues)
+}
+
+function Get-PzPublishedWorkshopId([string]$translationModPath) {
+    $meta = Get-PzTranslationMetadata $translationModPath
+    if ($null -eq $meta) { return "" }
+    try { return [string]$meta.TranslationWorkshopId } catch { return "" }
+}
+
+function Set-PzPublishedWorkshopId([string]$translationModPath, [string]$workshopId) {
+    if ([string]::IsNullOrWhiteSpace($translationModPath) -or -not (Test-Path -LiteralPath $translationModPath) -or
+        [string]::IsNullOrWhiteSpace($workshopId) -or $workshopId -notmatch '^\d+$') { return $false }
+    $metaPath = Join-Path $translationModPath "ModTranslationToolkit.json"
+    if (-not (Test-Path -LiteralPath $metaPath)) { return $false }
+    try {
+        $meta = Get-Content -LiteralPath $metaPath -Raw -Encoding UTF8 | ConvertFrom-Json
+        $meta | Add-Member -NotePropertyName TranslationWorkshopId -NotePropertyValue $workshopId -Force
+        [System.IO.File]::WriteAllText($metaPath,($meta | ConvertTo-Json -Depth 6),(New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false)))
+        return $true
+    } catch { return $false }
+}
+
+
+function Get-PzWorkshopStageRoot {
+    $root = Join-Path $env:USERPROFILE "Zomboid\Workshop"
+
+    if (-not (Test-Path -LiteralPath $root)) {
+        try {
+            New-Item -ItemType Directory -Path $root -Force | Out-Null
+        } catch {
+            throw "Could not create Project Zomboid Workshop staging folder: $root"
+        }
+    }
+
+    return $root
+}
+
+function New-PzWorkshopStage(
+    [string]$builtModPath,
+    [string]$displayName,
+    [string]$descriptionText
+) {
+    if ([string]::IsNullOrWhiteSpace($builtModPath) -or -not (Test-Path -LiteralPath $builtModPath)) {
+        throw "Built Project Zomboid mod path is invalid."
+    }
+
+    $stageRoot = Get-PzWorkshopStageRoot
+    $folderName = ($displayName -replace '[\\/:*?"<>|]', '_')
+    $stagePath = Join-Path $stageRoot $folderName
+
+    if (Test-Path -LiteralPath $stagePath) {
+        Remove-Item -LiteralPath $stagePath -Recurse -Force
+    }
+
+    $contentsMods = Join-Path $stagePath "Contents\mods"
+    $innerName = Split-Path $builtModPath -Leaf
+    $innerDest = Join-Path $contentsMods $innerName
+
+    New-Item -ItemType Directory -Path $contentsMods -Force | Out-Null
+    Copy-Item -LiteralPath $builtModPath -Destination $innerDest -Recurse -Force
+
+    # B42 Workshop uploader expects a mod.info directly in
+    # Contents\mods\<ModName> as well as versioned 42/42.x metadata.
+    $rootInfo = Join-Path $innerDest "mod.info"
+    if (-not (Test-Path -LiteralPath $rootInfo)) {
+        $preferred = Get-PzPreferredModInfo $innerDest
+        if ($null -ne $preferred -and (Test-Path -LiteralPath $preferred.Path)) {
+            Copy-Item -LiteralPath $preferred.Path -Destination $rootInfo -Force
+        } else {
+            throw "Workshop package could not create root mod.info."
+        }
+    }
+
+    $rootPoster = Join-Path $innerDest "poster.png"
+    if (-not (Test-Path -LiteralPath $rootPoster)) {
+        $candidatePoster = Get-ChildItem -LiteralPath $innerDest -Filter "poster.png" -File -Recurse -ErrorAction SilentlyContinue |
+            Select-Object -First 1
+        if ($candidatePoster) {
+            Copy-Item -LiteralPath $candidatePoster.FullName -Destination $rootPoster -Force
+        }
+    }
+
+    $poster = Join-Path $builtModPath "poster.png"
+    New-PzWorkshopPreview $poster (Join-Path $stagePath "preview.png")
+
+    $publishedId = Get-PzPublishedWorkshopId $builtModPath
+    $workshopTxt = @"
+version=1
+id=$publishedId
+title=$displayName
+description=$descriptionText
+tags=Translation
+visibility=public
+"@
+
+    [System.IO.File]::WriteAllText(
+        (Join-Path $stagePath "workshop.txt"),
+        $workshopTxt,
+        (New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false))
+    )
+
+    $stageIssues = @(Test-PzWorkshopStage $stagePath)
+    if ($stageIssues.Count -gt 0) {
+        throw ("Workshop package validation failed: " + ($stageIssues -join "; "))
+    }
+
+    return $stagePath
+}
+
+function Build-PzTranslationMod([string]$parentFolder) {
+    if ($script:PzEntries.Count -eq 0) {
+        throw "No Project Zomboid entries are loaded."
+    }
+
+    $selectedPath = [string]$txtPzModPath.Text
+    if ([string]::IsNullOrWhiteSpace($selectedPath) -or -not (Test-Path -LiteralPath $selectedPath)) {
+        throw "Project Zomboid source mod folder is invalid."
+    }
+
+    $sourceModPath = $selectedPath
+    $mod = $null
+
+    if (Test-IsPzToolkitTranslationMod $selectedPath) {
+        $metaExisting = Get-PzTranslationMetadata $selectedPath
+        $resolvedOriginal = Resolve-PzOriginalModPathFromMetadata $metaExisting
+
+        if ([string]::IsNullOrWhiteSpace($resolvedOriginal) -or -not (Test-Path -LiteralPath $resolvedOriginal)) {
+            throw "Could not resolve the original Project Zomboid mod."
+        }
+
+        $sourceModPath = $resolvedOriginal
+        $mod = Get-PzModInfo $sourceModPath ([string]$metaExisting.OriginalName) ([string]$metaExisting.OriginalWorkshopId)
+        $script:PzEditingTranslationPath = $selectedPath
+    } else {
+        $mod = Get-PzCurrentDetectedModInfo
+    }
+
+    if ($null -eq $mod) {
+        throw "Could not resolve Project Zomboid mod metadata."
+    }
+
+    $preferredInfo = Get-PzPreferredModInfo $sourceModPath
+    if ($null -eq $preferredInfo) {
+        throw "The selected Project Zomboid mod does not contain a supported mod.info layout."
+    }
+
+    $targetLang = Get-PzSelectedLanguage $cmbPzTargetLang
+    $targetCode = Get-PzTargetFolderCode
+    $targetName = if ($null -ne $targetLang) { [string]$targetLang.DisplayEnglish } else { "Polish" }
+
+    $displayName = "$($mod.Name) - $targetName Translation"
+    $safeName = ($displayName -replace '[\\/:*?"<>|]', '_')
+
+    if (-not [string]::IsNullOrWhiteSpace([string]$script:PzEditingTranslationPath) -and
+        (Test-Path -LiteralPath $script:PzEditingTranslationPath)) {
+        $outMod = [string]$script:PzEditingTranslationPath
+        Remove-Item -LiteralPath $outMod -Recurse -Force
+        New-Item -ItemType Directory -Path $outMod -Force | Out-Null
+    } else {
+        $outMod = Join-Path $parentFolder $safeName
+        if (Test-Path -LiteralPath $outMod) {
+            Remove-Item -LiteralPath $outMod -Recurse -Force
+        }
+        New-Item -ItemType Directory -Path $outMod -Force | Out-Null
+    }
+
+    Copy-PzStructureSkeleton $sourceModPath $outMod
+
+    $translationId = Get-PzTranslationBuildId ([string]$mod.ModId) ([string](Get-PzSelectedLanguage $cmbPzTargetLang).Code)
+
+    $copiedInfos = @(Find-PzModInfoFiles $outMod)
+    if ($copiedInfos.Count -eq 0) {
+        $fallbackInfo = Join-Path $outMod $preferredInfo.RelativePath
+        New-Item -ItemType Directory -Path (Split-Path $fallbackInfo -Parent) -Force | Out-Null
+        [System.IO.File]::WriteAllText(
+            $fallbackInfo,
+            "",
+            (New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false))
+        )
+        $copiedInfos = @(Find-PzModInfoFiles $outMod)
+    }
+
+    foreach ($info in $copiedInfos) {
+        Update-PzModInfoFile $info.Path $displayName $translationId ([string]$mod.ModId) $targetName
+    }
+
+    $groups = @($script:PzEntries | Group-Object Root,File)
+
+    foreach ($group in $groups) {
+        $first = $group.Group | Select-Object -First 1
+        $rootLabel = [string]$first.Root
+        $fileName = [string]$first.File
+        $format = [string]$first.Format
+
+        $sourceRoot = $script:PzContentRoots | Where-Object { $_.Label -eq $rootLabel } | Select-Object -First 1
+        if ($null -eq $sourceRoot) { continue }
+
+        $srcLang = Get-PzSelectedLanguage $cmbPzSourceLang
+        $srcCode = Get-PzLanguageCode ([string]$srcLang.Code)
+        $sourceFile = Join-Path $sourceRoot.Path "media\lua\shared\Translate\$srcCode\$fileName"
+        if (-not (Test-Path -LiteralPath $sourceFile)) { continue }
+
+        $contentRel = ""
+        try {
+            $contentRel = $sourceRoot.Path.Substring($sourceModPath.TrimEnd('\').Length).TrimStart('\')
+        } catch {}
+
+        $outRoot = if ([string]::IsNullOrWhiteSpace($contentRel)) {
+            $outMod
+        } else {
+            Join-Path $outMod $contentRel
+        }
+
+        $destFile = Join-Path $outRoot "media\lua\shared\Translate\$targetCode\$fileName"
+
+        $map = @{}
+        foreach ($e in $group.Group) {
+            $value = if ([string]::IsNullOrWhiteSpace([string]$e.Translation)) {
+                [string]$e.Source
+            } else {
+                [string]$e.Translation
+            }
+            $map[[string]$e.Key] = $value
+        }
+
+        if ($format -eq "JSON" -or $fileName.ToLowerInvariant().EndsWith(".json")) {
+            Write-PzJsonTranslationFile $sourceFile $destFile $map
+        } else {
+            Write-PzTxtTranslationFile $sourceFile $destFile $map
+        }
+    }
+
+    $rootPoster = Join-Path $outMod "poster.png"
+    New-PzTranslationPoster $sourceModPath $rootPoster $targetCode
+    Install-PzPosterBesideModInfos $outMod $rootPoster
+
+    $originalWorkshopUrl = ""
+    if (-not [string]::IsNullOrWhiteSpace([string]$mod.WorkshopId)) {
+        $originalWorkshopUrl = "https://steamcommunity.com/sharedfiles/filedetails/?id=$($mod.WorkshopId)"
+    }
+
+    $workshop = @"
+[h1]$displayName[/h1]
+
+$targetName translation for [b]$($mod.Name)[/b].
+
+[b]Target language:[/b] $targetName
+[b]Original mod ID:[/b] $($mod.ModId)
+[b]Original Workshop ID:[/b] $($mod.WorkshopId)
+
+This mod contains localization files only and requires the original mod.
+
+Original mod:
+$originalWorkshopUrl
+
+Created with Mod Translation Toolkit.
+https://github.com/DrizztGaming/Mod-Translation-Toolkit
+"@
+
+    $workshopPath = Join-Path $outMod "SteamWorkshopDescription.txt"
+    [System.IO.File]::WriteAllText(
+        $workshopPath,
+        $workshop,
+        (New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false))
+    )
+
+    $meta = [pscustomobject]@{
+        ToolkitVersion = $AppVersion
+        OriginalName = [string]$mod.Name
+        OriginalModId = [string]$mod.ModId
+        OriginalWorkshopId = [string]$mod.WorkshopId
+        TranslationWorkshopId = Get-PzPublishedWorkshopId $selectedPath
+        OriginalPath = $sourceModPath
+        SourcePreferredModInfo = [string]$preferredInfo.RelativePath
+        TranslationId = $translationId
+        TargetLanguage = [string](Get-PzSelectedLanguage $cmbPzTargetLang).Code
+        BuiltAt = (Get-Date).ToString("o")
+    } | ConvertTo-Json -Depth 4
+
+    [System.IO.File]::WriteAllText(
+        (Join-Path $outMod "ModTranslationToolkit.json"),
+        $meta,
+        (New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false))
+    )
+
+    $stageDescription = "$targetName translation for $($mod.Name). Requires the original mod."
+    $workshopStage = New-PzWorkshopStage $outMod $displayName $stageDescription
+
+    $script:PzEditingTranslationPath = $outMod
+    $script:PzLastBuildPath = $outMod
+    $script:PzLastWorkshopDescriptionPath = $workshopPath
+    $script:PzLastWorkshopStagePath = $workshopStage
+    return $outMod
+}
+
+
+function Export-PzCsv([string]$path) {
+    $sourceLang = Get-PzSelectedLanguage $cmbPzSourceLang
+    $targetLang = Get-PzSelectedLanguage $cmbPzTargetLang
+
+    $src = if ($null -ne $sourceLang) { [string]$sourceLang.Code } else { "" }
+    $dst = if ($null -ne $targetLang) { [string]$targetLang.Code } else { "" }
+
+    $rows = @(
+        $script:PzEntries |
+            Select-Object Root,File,Key,Source,Translation,Line,Format,
+                @{N="SourceLanguage";E={$src}},
+                @{N="TargetLanguage";E={$dst}}
+    )
+    Write-ToolkitCsvAtomic $rows $path
+}
+
+function Import-PzCsv([string]$path) {
+    $rows = @(Microsoft.PowerShell.Utility\Import-Csv -LiteralPath $path -Encoding UTF8 -Delimiter ';')
+    if ($rows.Count -eq 0) { return 0 }
+
+    $lookup = @{}
+    foreach ($r in $rows) {
+        $id = "$([string]$r.Root)|$([string]$r.File)|$([string]$r.Key)".ToLowerInvariant()
+        $lookup[$id] = [string]$r.Translation
+    }
+
+    $updated = 0
+    foreach ($e in $script:PzEntries) {
+        $id = (Get-PzEntryIdentity $e).ToLowerInvariant()
+        if ($lookup.ContainsKey($id)) {
+            $e.Translation = [string]$lookup[$id]
+            $updated++
+        }
+    }
+
+    Refresh-PzGrid
+    return $updated
+}
+
 function Get-ProviderLanguageCode([string]$provider, [string]$languageCode, [string]$role="Any") {
     $lang = Get-LanguageByCode $languageCode
     if ($null -eq $lang) { return $null }
@@ -1215,6 +3194,8 @@ function Test-MultilingualConfiguration {
 
     return @($issues)
 }
+
+$script:RimWorldGameEntries = @()
 
 # ---------- RimWorld profile ----------
 function Get-AboutInfo([string]$modPath) {
@@ -2827,15 +4808,151 @@ function Analyze-Mod([string]$modPath) {
     }
 }
 
+
+# ---------- Crash-safe translation checkpoints ----------
+function Get-ToolkitAutosaveDirectory {
+    $root = Join-Path $env:APPDATA "ModTranslationToolkit\autosave"
+    if (-not (Test-Path -LiteralPath $root)) {
+        New-Item -ItemType Directory -Path $root -Force | Out-Null
+    }
+    return $root
+}
+
+function ConvertTo-SafeFileName([string]$name) {
+    if ([string]::IsNullOrWhiteSpace($name)) { return "translation" }
+    $safe = $name -replace '[\\/:*?"<>|]', '_'
+    $safe = $safe.Trim()
+    if ([string]::IsNullOrWhiteSpace($safe)) { return "translation" }
+    return $safe
+}
+
+function Write-ToolkitCsvAtomic([object[]]$rows, [string]$path) {
+    if ($null -eq $rows -or $rows.Count -eq 0) {
+        throw $(if ($script:UiLanguage -eq "en") {
+            "There are no rows to write to CSV."
+        } else {
+            "Brak wpisów do zapisania w CSV."
+        })
+    }
+
+    $parent = Split-Path -Parent $path
+    if ([string]::IsNullOrWhiteSpace($parent)) {
+        $parent = (Get-Location).Path
+    }
+    if (-not (Test-Path -LiteralPath $parent)) {
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+    }
+
+    $leaf = Split-Path -Leaf $path
+    $tmp = Join-Path $parent (".$leaf.$([guid]::NewGuid().ToString('N')).tmp")
+
+    try {
+        $rows | Microsoft.PowerShell.Utility\Export-Csv `
+            -LiteralPath $tmp -NoTypeInformation -Encoding UTF8 -Delimiter ';'
+
+        if (-not (Test-Path -LiteralPath $tmp)) {
+            throw "Temporary CSV file was not created."
+        }
+
+        $length = (Get-Item -LiteralPath $tmp).Length
+        if ($length -le 0) {
+            throw "Temporary CSV file is empty."
+        }
+
+        if (Test-Path -LiteralPath $path) {
+            Remove-Item -LiteralPath $path -Force
+        }
+
+        Move-Item -LiteralPath $tmp -Destination $path -Force
+
+        if (-not (Test-Path -LiteralPath $path) -or (Get-Item -LiteralPath $path).Length -le 0) {
+            throw "CSV verification failed after writing."
+        }
+    }
+    finally {
+        if (Test-Path -LiteralPath $tmp) {
+            Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Save-ToolkitTranslationCheckpoint([string]$reason = "manual") {
+    if ($script:Entries.Count -eq 0) { return $null }
+
+    $autosaveDir = Get-ToolkitAutosaveDirectory
+    $sourceCode = Get-SelectedSourceLanguageCode
+    $targetCode = Get-SelectedTargetLanguageCode
+    $modName = ConvertTo-SafeFileName $script:OriginalModName
+    $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+    $baseName = "$stamp-$modName-$sourceCode-$targetCode"
+
+    $csvPath = Join-Path $autosaveDir "$baseName.csv"
+    $metaPath = Join-Path $autosaveDir "$baseName.json"
+    $latestCsv = Join-Path $autosaveDir "latest.csv"
+    $latestMeta = Join-Path $autosaveDir "latest.json"
+
+    $rows = @(
+        $script:Entries |
+            Select-Object Kind,File,Key,Source,Translation,DefType,DefName,Field,
+                @{N="SourceLanguage";E={$sourceCode}},
+                @{N="TargetLanguage";E={$targetCode}}
+    )
+
+    Write-ToolkitCsvAtomic $rows $csvPath
+    Copy-Item -LiteralPath $csvPath -Destination $latestCsv -Force
+
+    $translated = @($script:Entries | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.Translation) }).Count
+    $meta = [pscustomobject]@{
+        Version = $AppVersion
+        SavedAt = (Get-Date).ToString("o")
+        Reason = $reason
+        OriginalModName = [string]$script:OriginalModName
+        OriginalModPath = [string]$script:OriginalModPath
+        OriginalPackageId = [string]$script:OriginalPackageId
+        EditingTranslationModPath = [string]$script:EditingTranslationModPath
+        SourceLanguage = $sourceCode
+        TargetLanguage = $targetCode
+        Entries = $script:Entries.Count
+        TranslatedEntries = $translated
+        CsvPath = $csvPath
+    }
+
+    $json = $meta | ConvertTo-Json -Depth 4
+    [System.IO.File]::WriteAllText($metaPath, $json, (New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false)))
+    [System.IO.File]::WriteAllText($latestMeta, $json, (New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false)))
+
+    # Keep the autosave directory bounded. Preserve latest.* plus 20 newest timestamped pairs.
+    try {
+        $oldCsv = @(Get-ChildItem -LiteralPath $autosaveDir -File -Filter "*.csv" |
+            Where-Object { $_.Name -ne "latest.csv" } |
+            Sort-Object LastWriteTime -Descending |
+            Select-Object -Skip 20)
+        foreach ($f in $oldCsv) {
+            $jsonPeer = [System.IO.Path]::ChangeExtension($f.FullName, ".json")
+            Remove-Item -LiteralPath $f.FullName -Force -ErrorAction SilentlyContinue
+            if (Test-Path -LiteralPath $jsonPeer) {
+                Remove-Item -LiteralPath $jsonPeer -Force -ErrorAction SilentlyContinue
+            }
+        }
+    } catch {}
+
+    return $csvPath
+}
+
 function Export-ToolkitCsv([string]$path) {
     $sourceCode = Get-SelectedSourceLanguageCode
     $targetCode = Get-SelectedTargetLanguageCode
 
-    $script:Entries |
-        Select-Object Kind,File,Key,Source,Translation,DefType,DefName,Field,
-            @{N="SourceLanguage";E={$sourceCode}},
-            @{N="TargetLanguage";E={$targetCode}} |
-        Microsoft.PowerShell.Utility\Export-Csv -LiteralPath $path -NoTypeInformation -Encoding UTF8 -Delimiter ';'
+    [void](Save-ToolkitTranslationCheckpoint "before-csv-export")
+
+    $rows = @(
+        $script:Entries |
+            Select-Object Kind,File,Key,Source,Translation,DefType,DefName,Field,
+                @{N="SourceLanguage";E={$sourceCode}},
+                @{N="TargetLanguage";E={$targetCode}}
+    )
+
+    Write-ToolkitCsvAtomic $rows $path
 }
 
 function Import-ToolkitCsv([string]$path) {
@@ -2909,7 +5026,7 @@ function Write-LanguageFiles([string]$outMod) {
         }
 
         [void]$sb.AppendLine('</LanguageData>')
-        [System.IO.File]::WriteAllText($dest, $sb.ToString(), (New-Object System.Text.UTF8Encoding($false)))
+        [System.IO.File]::WriteAllText($dest, $sb.ToString(), (New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false)))
     }
 }
 
@@ -3113,7 +5230,7 @@ function Save-ToolkitCreatorId([string]$creatorId) {
     $creatorId = ($creatorId.ToLowerInvariant() -replace '[^a-z0-9]+','').Trim()
     if ([string]::IsNullOrWhiteSpace($creatorId)) { throw "Creator ID cannot be empty." }
     $path = Join-Path (Get-ToolkitSettingsDirectory) "creator-id.txt"
-    [System.IO.File]::WriteAllText($path, $creatorId, (New-Object System.Text.UTF8Encoding($false)))
+    [System.IO.File]::WriteAllText($path, $creatorId, (New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false)))
     return $creatorId
 }
 
@@ -3218,12 +5335,14 @@ function Build-SteamWorkshopDescription([string]$outMod, [string]$translationAut
     [System.IO.File]::WriteAllText(
         $path,
         $description,
-        (New-Object System.Text.UTF8Encoding($false))
+        (New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false))
     )
     return $path
 }
 
 function Build-TranslationMod([string]$parentFolder) {
+    [void](Save-ToolkitTranslationCheckpoint "before-mod-build")
+
     $lang = Get-TargetLanguageInfo
     if ([string]::IsNullOrWhiteSpace($script:OriginalPackageId)) {
         throw "Oryginalny mod nie ma packageId w About.xml."
@@ -3308,7 +5427,7 @@ $dependencyLinks    </li>
 "@
 
     if (-not $isEditingExisting -or -not (Test-Path (Join-Path $outMod "About\About.xml"))) {
-        [System.IO.File]::WriteAllText((Join-Path $outMod "About\About.xml"), $aboutText, (New-Object System.Text.UTF8Encoding($false)))
+        [System.IO.File]::WriteAllText((Join-Path $outMod "About\About.xml"), $aboutText, (New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false)))
     }
 
 
@@ -3354,7 +5473,7 @@ Target existing coverage: $((Get-CoverageText (Get-SelectedTargetLanguageCode)))
 Existing target entries auto-loaded: $((AutoLoad-ExistingTargetTranslation))
 Preview generated: $previewCreated
 "@
-    [System.IO.File]::WriteAllText((Join-Path $outMod "TranslationBuildReport.txt"), $report, (New-Object System.Text.UTF8Encoding($false)))
+    [System.IO.File]::WriteAllText((Join-Path $outMod "TranslationBuildReport.txt"), $report, (New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false)))
 
     return $outMod
 }
@@ -3963,7 +6082,7 @@ function Write-KenshiPoFile([string]$path, $entries, [string]$languageCode="pl_P
         [void]$sb.AppendLine("msgstr $(ConvertTo-PoQuoted ([string]$e.Translation))")
         [void]$sb.AppendLine('')
     }
-    [System.IO.File]::WriteAllText($path, $sb.ToString(), (New-Object System.Text.UTF8Encoding($false)))
+    [System.IO.File]::WriteAllText($path, $sb.ToString(), (New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false)))
 }
 
 function Write-KenshiMoFile([string]$path, $entries) {
@@ -3978,7 +6097,7 @@ function Write-KenshiMoFile([string]$path, $entries) {
     }
 
     $pairs = @($pairs | Sort-Object Id)
-    $utf8 = New-Object System.Text.UTF8Encoding($false)
+    $utf8 = New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false)
     $n = $pairs.Count
     $headerSize = 28
     $origTable = $headerSize
@@ -4079,7 +6198,7 @@ locale\pl_PL\pl_PL.translation
 Toolkit created backups before overwriting existing PO/MO files.
 "@
     New-Item -ItemType Directory -Path $localeRoot -Force | Out-Null
-    [System.IO.File]::WriteAllText((Join-Path $localeRoot "ModTranslationToolkit-Kenshi.txt"), $instructions, (New-Object System.Text.UTF8Encoding($false)))
+    [System.IO.File]::WriteAllText((Join-Path $localeRoot "ModTranslationToolkit-Kenshi.txt"), $instructions, (New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false)))
     return $localeRoot
 }
 
@@ -4213,7 +6332,7 @@ function Save-WorkshopProfile {
     [System.IO.File]::WriteAllText(
         (Get-WorkshopProfilePath),
         $json,
-        (New-Object System.Text.UTF8Encoding($false))
+        (New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false))
     )
 }
 
@@ -4384,7 +6503,7 @@ function Apply-CreatorProfileToTranslator {
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Mod Translation Toolkit v0.7.8"
+        Title="Mod Translation Toolkit v0.10.8"
         Height="840" Width="1260"
         WindowStartupLocation="CenterScreen"
         Background="#121018"
@@ -4543,7 +6662,7 @@ function Apply-CreatorProfileToTranslator {
         <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
           <Button Name="btnApiSettings" Content="API / Tłumaczenie" Margin="0,0,8,0"/>
           <Border Background="#2B2038" CornerRadius="5" Padding="10,5" VerticalAlignment="Center">
-            <TextBlock Text="v0.7.8" Foreground="#CDA8F2" FontWeight="SemiBold"/>
+            <TextBlock Text="v0.10.8" Foreground="#CDA8F2" FontWeight="SemiBold"/>
           </Border>
         </StackPanel>
       </Grid>
@@ -4619,7 +6738,15 @@ function Apply-CreatorProfileToTranslator {
               <ColumnDefinition Width="Auto"/>
             </Grid.ColumnDefinitions>
             <StackPanel Grid.Column="0" Orientation="Horizontal">
-              <TextBlock Name="lblRimWorldGameCount" Text="Wpisy: 0" VerticalAlignment="Center" Margin="0,0,16,0"/>
+              <TextBlock Name="lblRimWorldGameCount" Text="Wpisy: 0" VerticalAlignment="Center" Margin="0,0,12,0"/>
+              <TextBlock Name="lblRimWorldGameFilter" Text="Filtr:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+              <ComboBox Name="cmbRimWorldGameFilter" Width="190" Margin="0,0,12,0">
+                <ComboBoxItem Content="Wszystkie" Tag="all" IsSelected="True"/>
+                <ComboBoxItem Content="Brak tłumaczenia" Tag="missing"/>
+                <ComboBoxItem Content="Przetłumaczone" Tag="translated"/>
+                <ComboBoxItem Content="Identyczne source/target" Tag="identical"/>
+                <ComboBoxItem Content="Podejrzane" Tag="suspicious"/>
+              </ComboBox>
               <TextBlock Name="txtRimWorldGameStatus" Text="Wybierz folder gry albo użyj automatycznego wykrywania."
                          Foreground="#B9AEC9" VerticalAlignment="Center"/>
             </StackPanel>
@@ -4875,6 +7002,172 @@ function Apply-CreatorProfileToTranslator {
                      Text="Wykryj Kenshi lub wskaż folder instalacji. Profil obsługuje na razie tylko podstawową grę."/>
         </Grid>
       </TabItem>
+      
+      <TabItem Name="tabProjectZomboidGame" Header="Project Zomboid Game">
+        <Grid Margin="12" Background="{StaticResource Bg}">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
+
+          <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,10">
+            <Button Name="btnDetectPzGame" Content="Wykryj Project Zomboid"/>
+            <Button Name="btnChoosePzGame" Content="Wybierz folder gry"/>
+            <TextBox Name="txtPzGamePath" Width="650" Margin="8,0" AllowDrop="True"
+                     ToolTip="Wklej ścieżkę lub przeciągnij tutaj folder Project Zomboid."/>
+            <Button Name="btnOpenPzGameFolder" Content="Otwórz folder"/>
+          </StackPanel>
+
+          <Border Grid.Row="1" Background="#211A2B" BorderBrush="#4A385D" BorderThickness="1"
+                  CornerRadius="6" Padding="10" Margin="0,0,0,10">
+            <StackPanel>
+              <TextBlock Name="txtPzGameTitle" Text="Project Zomboid Game - eksperymentalny profil"
+                         FontSize="18" FontWeight="SemiBold" Foreground="#CDA8F2"/>
+              <TextBlock Name="txtPzGameSubtitle"
+                         Text="Skanuje pliki TXT i JSON w media/lua/shared/Translate/&lt;LANG&gt;."
+                         Foreground="#B9AEC9" Margin="0,4,0,0" TextWrapping="Wrap"/>
+              <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                <TextBlock Name="lblPzGameSource" Text="Źródło:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <ComboBox Name="cmbPzGameSourceLang" Width="220" Margin="0,0,14,0"/>
+                <TextBlock Name="lblPzGameTarget" Text="Cel:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <ComboBox Name="cmbPzGameTargetLang" Width="220"/>
+              </StackPanel>
+            </StackPanel>
+          </Border>
+
+          <StackPanel Grid.Row="2" Margin="0,0,0,10">
+            <WrapPanel>
+              <Button Name="btnScanPzGame" Content="Skanuj grę"/>
+              <Button Name="btnTranslatePzGameMissing" Content="Tłumacz brakujące"/>
+              <Button Name="btnExportPzGameCsv" Content="Eksport CSV"/>
+              <Button Name="btnImportPzGameCsv" Content="Import CSV"/>
+              <TextBlock Name="lblPzGameFilter" Text="Filtr:" VerticalAlignment="Center" Margin="10,0,6,0"/>
+              <ComboBox Name="cmbPzGameFilter" Width="170">
+                <ComboBoxItem Content="Wszystkie" Tag="all" IsSelected="True"/>
+                <ComboBoxItem Content="Brak targetu" Tag="missing"/>
+                <ComboBoxItem Content="Identyczne source/target" Tag="identical"/>
+                <ComboBoxItem Content="Podejrzane / untranslated" Tag="suspicious"/>
+              </ComboBox>
+              <Label Name="lblPzGameCount" Content="Wpisy: 0" VerticalContentAlignment="Center" Margin="8,0,0,0"/>
+            </WrapPanel>
+            <Grid Margin="0,8,0,0">
+              <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*"/>
+                <ColumnDefinition Width="85"/>
+              </Grid.ColumnDefinitions>
+              <ProgressBar Name="prgPzGameScan" Grid.Column="0" Height="18" Minimum="0" Maximum="100" Value="0" ToolTip="Postęp skanowania lub automatycznego tłumaczenia"/>
+              <TextBlock Name="lblPzGameProgress" Grid.Column="1" Text="0%" HorizontalAlignment="Right"
+                         VerticalAlignment="Center" Margin="10,0,0,0"/>
+            </Grid>
+          </StackPanel>
+
+          <DataGrid Grid.Row="3" Name="pzGameGrid" AutoGenerateColumns="False" CanUserAddRows="False"
+                    CanUserDeleteRows="False" IsReadOnly="False" SelectionMode="Extended"
+                    EnableRowVirtualization="True" AlternationCount="2">
+            <DataGrid.Columns>
+              <DataGridTextColumn Header="Plik" Binding="{Binding File}" Width="190" IsReadOnly="True"/>
+              <DataGridTextColumn Header="Klucz" Binding="{Binding Key}" Width="300" IsReadOnly="True"/>
+              <DataGridTemplateColumn Header="Źródło" Width="*">
+                <DataGridTemplateColumn.CellTemplate>
+                  <DataTemplate>
+                    <TextBox Text="{Binding Source}" IsReadOnly="True" IsReadOnlyCaretVisible="True"
+                             BorderThickness="0" Background="Transparent" Foreground="#ECE8F6"
+                             Padding="2,0" TextWrapping="NoWrap"/>
+                  </DataTemplate>
+                </DataGridTemplateColumn.CellTemplate>
+              </DataGridTemplateColumn>
+              <DataGridTextColumn Header="Tłumaczenie"
+                                  Binding="{Binding Translation, UpdateSourceTrigger=PropertyChanged}" Width="*"/>
+            </DataGrid.Columns>
+          </DataGrid>
+
+          <TextBlock Grid.Row="4" Name="txtPzGameStatus" Margin="0,10,0,0" TextWrapping="Wrap"
+                     Foreground="#B9AEC9"
+                     Text="Wykryj Project Zomboid lub wskaż folder instalacji gry."/>
+        </Grid>
+      </TabItem>
+<TabItem Name="tabProjectZomboidMod" Header="Project Zomboid Mod">
+        <Grid Margin="12" Background="{StaticResource Bg}">
+          <Grid.RowDefinitions>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="Auto"/>
+            <RowDefinition Height="*"/>
+            <RowDefinition Height="Auto"/>
+          </Grid.RowDefinitions>
+
+          <StackPanel Grid.Row="0" Orientation="Horizontal" Margin="0,0,0,8">
+            <Button Name="btnDetectPzMods" Content="Wykryj mody"/>
+            <Button Name="btnChoosePzMod" Content="Wybierz folder moda"/>
+            <TextBox Name="txtPzModPath" Width="620" Margin="8,0" AllowDrop="True"
+                     ToolTip="Ścieżka aktualnie wybranego moda Project Zomboid."/>
+            <Button Name="btnOpenPzModFolder" Content="Otworz folder"/>
+          </StackPanel>
+
+          <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,10">
+            <TextBlock Name="lblPzDetectedMod" Text="Wykryty mod:" VerticalAlignment="Center" Margin="0,0,8,0"/>
+            <ComboBox Name="cmbPzDetectedMods" Width="620"/>
+            <TextBlock Name="lblPzDetectedCount" Text="Mody: 0" VerticalAlignment="Center" Margin="12,0,0,0"/>
+          </StackPanel>
+
+          <Border Grid.Row="2" Background="#211A2B" BorderBrush="#4A385D" BorderThickness="1"
+                  CornerRadius="6" Padding="10" Margin="0,0,0,10">
+            <StackPanel>
+              <TextBlock Name="txtPzTitle" Text="Project Zomboid Mod - eksperymentalny profil" FontSize="18"
+                         FontWeight="SemiBold" Foreground="#CDA8F2"/>
+              <TextBlock Name="txtPzSubtitle"
+                         Text="Obsługa B41/B42: TXT oraz JSON, w tym wersjonowane katalogi modów B42."
+                         Foreground="#B9AEC9" Margin="0,4,0,0" TextWrapping="Wrap"/>
+              <StackPanel Orientation="Horizontal" Margin="0,10,0,0">
+                <TextBlock Name="lblPzSource" Text="Zrodlo:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <ComboBox Name="cmbPzSourceLang" Width="220" Margin="0,0,14,0"/>
+                <TextBlock Name="lblPzTarget" Text="Cel:" VerticalAlignment="Center" Margin="0,0,6,0"/>
+                <ComboBox Name="cmbPzTargetLang" Width="220"/>
+              </StackPanel>
+            </StackPanel>
+          </Border>
+
+          <WrapPanel Grid.Row="3" Margin="0,0,0,10">
+            <Button Name="btnScanPzMod" Content="Skanuj mod"/>
+            <Button Name="btnTranslatePzMissing" Content="Tlumacz brakujace"/>
+            <Button Name="btnExportPzCsv" Content="Eksport CSV"/>
+            <Button Name="btnImportPzCsv" Content="Import CSV"/>
+            <Button Name="btnBuildPzTranslation" Content="Zbuduj mod tlumaczeniowy"/>
+            <Button Name="btnOpenPzWorkshopStage" Content="Otworz paczke Workshop" IsEnabled="False"/>
+            <Button Name="btnCopyPzWorkshop" Content="Kopiuj opis Workshop" IsEnabled="False"/>
+            <Label Name="lblPzCount" Content="Wpisy: 0" VerticalContentAlignment="Center" Margin="8,0,0,0"/>
+          </WrapPanel>
+
+          <DataGrid Grid.Row="4" Name="pzGrid" AutoGenerateColumns="False" CanUserAddRows="False"
+                    CanUserDeleteRows="False" IsReadOnly="False" SelectionMode="Extended"
+                    EnableRowVirtualization="True" AlternationCount="2">
+            <DataGrid.Columns>
+              <DataGridTextColumn Header="Root" Binding="{Binding Root}" Width="110" IsReadOnly="True"/>
+              <DataGridTextColumn Header="Plik" Binding="{Binding File}" Width="190" IsReadOnly="True"/>
+              <DataGridTextColumn Header="Klucz" Binding="{Binding Key}" Width="280" IsReadOnly="True"/>
+              <DataGridTemplateColumn Header="Zrodlo" Width="*">
+                <DataGridTemplateColumn.CellTemplate>
+                  <DataTemplate>
+                    <TextBox Text="{Binding Source}" IsReadOnly="True" IsReadOnlyCaretVisible="True"
+                             BorderThickness="0" Background="Transparent" Foreground="#ECE8F6"
+                             Padding="2,0" TextWrapping="NoWrap"/>
+                  </DataTemplate>
+                </DataGridTemplateColumn.CellTemplate>
+              </DataGridTemplateColumn>
+              <DataGridTextColumn Header="Tlumaczenie"
+                                  Binding="{Binding Translation, UpdateSourceTrigger=PropertyChanged}" Width="*"/>
+            </DataGrid.Columns>
+          </DataGrid>
+
+          <TextBlock Grid.Row="5" Name="txtPzStatus" Margin="0,10,0,0" TextWrapping="Wrap"
+                     Foreground="#B9AEC9"
+                     Text="Wybierz mod Project Zomboid. Profil może teraz zbudować osobny mod tłumaczeniowy gotowy do przygotowania pod Workshop."/>
+        </Grid>
+      </TabItem>
         </TabControl>
       </TabItem>
       <TabItem Name="tabWorkshop" Header="Workshop">
@@ -4985,6 +7278,7 @@ $names = @(
   "btnImportRimWorldGameCsv",
   "rimWorldGameGrid",
   "lblRimWorldGameCount",
+    "lblRimWorldGameFilter","cmbRimWorldGameFilter",
   "txtRimWorldGameStatus",
   "btnApiSettings",
   "txtAppSubtitle",
@@ -4999,13 +7293,58 @@ $names = @(
   "cmbRwGameTargetLang",
   "lblCreatorId",
   "txtCreatorId",
-  "btnSaveCreatorId"
+  "btnSaveCreatorId",
+  "tabProjectZomboidGame",
+  "btnDetectPzGame",
+  "btnChoosePzGame",
+  "txtPzGamePath",
+  "btnOpenPzGameFolder",
+  "txtPzGameTitle",
+  "txtPzGameSubtitle",
+  "lblPzGameSource",
+  "cmbPzGameSourceLang",
+  "lblPzGameTarget",
+  "cmbPzGameTargetLang",
+  "btnScanPzGame",
+  "btnTranslatePzGameMissing",
+  "btnExportPzGameCsv",
+  "btnImportPzGameCsv",
+  "lblPzGameFilter",
+  "cmbPzGameFilter",
+  "lblPzGameCount",
+  "prgPzGameScan",
+  "lblPzGameProgress",
+  "pzGameGrid",
+  "txtPzGameStatus",
+  "tabProjectZomboidMod",
+  "btnDetectPzMods",
+  "btnChoosePzMod",
+  "lblPzDetectedMod",
+  "cmbPzDetectedMods",
+  "lblPzDetectedCount",
+  "txtPzModPath",
+  "btnOpenPzModFolder",
+  "txtPzTitle",
+  "txtPzSubtitle",
+  "lblPzSource",
+  "cmbPzSourceLang",
+  "lblPzTarget",
+  "cmbPzTargetLang",
+  "btnScanPzMod",
+  "btnTranslatePzMissing",
+  "btnExportPzCsv",
+  "btnImportPzCsv",
+  "btnBuildPzTranslation",
+  "btnOpenPzWorkshopStage",
+  "btnCopyPzWorkshop",
+  "lblPzCount",
+  "pzGrid",
+  "txtPzStatus"
 )
 foreach ($n in $names) { Set-Variable -Name $n -Value $window.FindName($n) }
 
 Load-WorkshopProfile
 Apply-CreatorProfileToTranslator
-Apply-CentralUiLanguage
 
 
 
@@ -5056,6 +7395,10 @@ Populate-LanguageCombo $cmbTargetLang "pl"
 Select-PreviewFlagForTargetLanguage
 Populate-LanguageCombo $cmbRwGameSourceLang "en"
 Populate-LanguageCombo $cmbRwGameTargetLang "pl"
+Populate-PzLanguageCombo $cmbPzSourceLang "en"
+Populate-PzLanguageCombo $cmbPzTargetLang "pl"
+Populate-PzLanguageCombo $cmbPzGameSourceLang "en"
+Populate-PzLanguageCombo $cmbPzGameTargetLang "pl"
 
 $cmbSourceLang.Add_SelectionChanged({
     if (-not [string]::IsNullOrWhiteSpace([string]$txtModPath.Text) -and (Test-ExistingFolderSafe $txtModPath.Text)) {
@@ -5105,6 +7448,8 @@ $script:UiText = @{
         RimWorldGame = "RimWorld Game"
         RimWorldMod = "RimWorld Mod"
         KenshiGame = "Kenshi Game"
+        ProjectZomboidMod = "Project Zomboid Mod"
+        ProjectZomboidGame = "Project Zomboid Game"
         Translation = "Tłumaczenie"
         InstalledMods = "Zainstalowane mody"
         DetectRimWorld = "Wykryj RimWorld"
@@ -5167,6 +7512,10 @@ $script:UiText = @{
         ScanKenshiBase = "Skanuj podstawę gry"
         FcsHelp = "Jak wyeksportować dane z FCS?"
         BuildKenshi = "Zapisz pliki tłumaczenia"
+        PzScan = "Skanuj mod"
+        PzChooseMod = "Wybierz folder moda"
+        PzExperimentalTitle = "Project Zomboid Mod - profil eksperymentalny"
+        PzExperimentalSubtitle = "Obsługa B41/B42: starsze TXT i obecne JSON, w tym wersjonowane katalogi modów B42."
         ApiSettings = "API / Tłumaczenie"
         LanguageBoth = "Oba"
         LanguageSource = "Oryginał"
@@ -5179,6 +7528,8 @@ $script:UiText = @{
         RimWorldGame = "RimWorld Game"
         RimWorldMod = "RimWorld Mod"
         KenshiGame = "Kenshi Game"
+        ProjectZomboidMod = "Project Zomboid Mod"
+        ProjectZomboidGame = "Project Zomboid Game"
         Translation = "Translation"
         InstalledMods = "Installed mods"
         DetectRimWorld = "Detect RimWorld"
@@ -5241,6 +7592,10 @@ $script:UiText = @{
         ScanKenshiBase = "Scan base game"
         FcsHelp = "How to export data from FCS?"
         BuildKenshi = "Save translation files"
+        PzScan = "Scan mod"
+        PzChooseMod = "Choose mod folder"
+        PzExperimentalTitle = "Project Zomboid Mod - experimental profile"
+        PzExperimentalSubtitle = "B41/B42 support: legacy TXT and current JSON translation files, including versioned B42 mod folders."
         ApiSettings = "Translation API"
         LanguageBoth = "Both"
         LanguageSource = "Source"
@@ -5284,6 +7639,8 @@ function Apply-CentralUiLanguage {
     Set-ControlContentIfExists $tabRimWorldGame "RimWorldGame"
     Set-ControlContentIfExists $tabRimWorldMod "RimWorldMod"
     Set-ControlContentIfExists $tabKenshi "KenshiGame"
+    Set-ControlContentIfExists $tabProjectZomboidGame "ProjectZomboidGame"
+    Set-ControlContentIfExists $tabProjectZomboidMod "ProjectZomboidMod"
     Set-ControlContentIfExists $tabTranslation "Translation"
     Set-ControlContentIfExists $tabInstalledMods "InstalledMods"
 
@@ -5356,6 +7713,43 @@ function Apply-CentralUiLanguage {
     Set-ControlContentIfExists $btnImportKenshiCsv "ImportCsv"
     Set-ControlContentIfExists $btnFcsHelpKenshi "FcsHelp"
     Set-ControlContentIfExists $btnBuildKenshi "BuildKenshi"
+
+    # Project Zomboid Game
+    if ($null -ne $btnDetectPzGame) { $btnDetectPzGame.Content = if ($script:UiLanguage -eq "en") { "Detect Project Zomboid" } else { "Wykryj Project Zomboid" } }
+    if ($null -ne $btnChoosePzGame) { $btnChoosePzGame.Content = T "ChooseGameFolder" }
+    if ($null -ne $btnOpenPzGameFolder) { $btnOpenPzGameFolder.Content = T "OpenFolder" }
+    if ($null -ne $btnScanPzGame) { $btnScanPzGame.Content = if ($script:UiLanguage -eq "en") { "Scan game" } else { "Skanuj grę" } }
+    if ($null -ne $btnTranslatePzGameMissing) { $btnTranslatePzGameMissing.Content = T "TranslateMissing" }
+    if ($null -ne $btnExportPzGameCsv) { $btnExportPzGameCsv.Content = T "ExportCsv" }
+    if ($null -ne $btnImportPzGameCsv) { $btnImportPzGameCsv.Content = T "ImportCsv" }
+    if ($null -ne $lblPzGameFilter) { $lblPzGameFilter.Text = if ($script:UiLanguage -eq "en") { "Filter:" } else { "Filtr:" } }
+    if ($null -ne $cmbPzGameFilter -and $cmbPzGameFilter.Items.Count -ge 4) {
+        $cmbPzGameFilter.Items[0].Content = if ($script:UiLanguage -eq "en") { "All" } else { "Wszystkie" }
+        $cmbPzGameFilter.Items[1].Content = if ($script:UiLanguage -eq "en") { "Missing target" } else { "Brak targetu" }
+        $cmbPzGameFilter.Items[2].Content = if ($script:UiLanguage -eq "en") { "Identical source/target" } else { "Identyczne source/target" }
+        $cmbPzGameFilter.Items[3].Content = if ($script:UiLanguage -eq "en") { "Suspicious / untranslated" } else { "Podejrzane / untranslated" }
+    }
+    if ($null -ne $txtPzGameTitle) { $txtPzGameTitle.Text = if ($script:UiLanguage -eq "en") { "Project Zomboid Game - experimental profile" } else { "Project Zomboid Game - profil eksperymentalny" } }
+    if ($null -ne $txtPzGameSubtitle) { $txtPzGameSubtitle.Text = if ($script:UiLanguage -eq "en") { "Scans TXT and JSON localization files from media/lua/shared/Translate/&lt;LANG&gt;." } else { "Skanuje pliki TXT i JSON w media/lua/shared/Translate/&lt;LANG&gt;." } }
+    if ($null -ne $lblPzGameSource) { $lblPzGameSource.Text = if ($script:UiLanguage -eq "en") { "Source:" } else { "Źródło:" } }
+    if ($null -ne $lblPzGameTarget) { $lblPzGameTarget.Text = if ($script:UiLanguage -eq "en") { "Target:" } else { "Cel:" } }
+
+    # Project Zomboid Mod
+    if ($null -ne $btnDetectPzMods) { $btnDetectPzMods.Content = if ($script:UiLanguage -eq "en") { "Detect mods" } else { "Wykryj mody" } }
+    if ($null -ne $lblPzDetectedMod) { $lblPzDetectedMod.Text = if ($script:UiLanguage -eq "en") { "Detected mod:" } else { "Wykryty mod:" } }
+    Set-ControlContentIfExists $btnChoosePzMod "PzChooseMod"
+    Set-ControlContentIfExists $btnOpenPzModFolder "OpenFolder"
+    Set-ControlContentIfExists $btnScanPzMod "PzScan"
+    Set-ControlContentIfExists $btnTranslatePzMissing "TranslateMissing"
+    Set-ControlContentIfExists $btnExportPzCsv "ExportCsv"
+    Set-ControlContentIfExists $btnImportPzCsv "ImportCsv"
+    if ($null -ne $btnBuildPzTranslation) { $btnBuildPzTranslation.Content = if ($script:UiLanguage -eq "en") { "Build translation mod" } else { "Zbuduj mod tłumaczeniowy" } }
+    if ($null -ne $btnOpenPzWorkshopStage) { $btnOpenPzWorkshopStage.Content = if ($script:UiLanguage -eq "en") { "Open Workshop package" } else { "Otwórz paczkę Workshop" } }
+    if ($null -ne $btnCopyPzWorkshop) { $btnCopyPzWorkshop.Content = if ($script:UiLanguage -eq "en") { "Copy Workshop description" } else { "Kopiuj opis Workshop" } }
+    if ($null -ne $txtPzTitle) { $txtPzTitle.Text = T "PzExperimentalTitle" }
+    if ($null -ne $txtPzSubtitle) { $txtPzSubtitle.Text = T "PzExperimentalSubtitle" }
+    if ($null -ne $lblPzSource) { $lblPzSource.Text = if ($script:UiLanguage -eq "en") { "Source:" } else { "Źródło:" } }
+    if ($null -ne $lblPzTarget) { $lblPzTarget.Text = if ($script:UiLanguage -eq "en") { "Target:" } else { "Cel:" } }
 
     # API
     Set-ControlContentIfExists $btnApiSettings "ApiSettings"
@@ -5785,6 +8179,446 @@ $grid.Add_PreviewKeyDown({
 
 
 
+
+
+
+$cmbPzGameFilter.Add_SelectionChanged({
+    try { Apply-PzGameFilter } catch {}
+})
+
+$btnDetectPzGame.Add_Click({
+    try {
+        $detected = Get-PzInstallPath
+        if ($detected) {
+            $txtPzGamePath.Text = $detected
+            $txtPzGameStatus.Text = if ($script:UiLanguage -eq "en") {
+                "Project Zomboid detected: $detected"
+            } else {
+                "Wykryto Project Zomboid: $detected"
+            }
+        } else {
+            [System.Windows.MessageBox]::Show(
+                $(if ($script:UiLanguage -eq "en") { "Project Zomboid was not found in detected Steam libraries." } else { "Nie znaleziono Project Zomboid w wykrytych bibliotekach Steam." }),
+                "Project Zomboid"
+            ) | Out-Null
+        }
+    } catch {
+        [System.Windows.MessageBox]::Show($_.Exception.Message, "Project Zomboid") | Out-Null
+    }
+})
+
+$btnChoosePzGame.Add_Click({
+    $picked = Show-ModernFolderPicker `
+        $(if ($script:UiLanguage -eq "en") { "Choose the main Project Zomboid folder" } else { "Wybierz główny folder Project Zomboid" }) `
+        $txtPzGamePath.Text
+    if ($picked) { $txtPzGamePath.Text = $picked }
+})
+
+$btnOpenPzGameFolder.Add_Click({
+    if (Test-Path -LiteralPath $txtPzGamePath.Text) {
+        Start-Process explorer.exe -ArgumentList "`"$($txtPzGamePath.Text)`""
+    }
+})
+
+$btnScanPzGame.Add_Click({
+    try {
+        Scan-PzGame $txtPzGamePath.Text | Out-Null
+    } catch {
+        [System.Windows.MessageBox]::Show($_.Exception.Message, "Project Zomboid Game") | Out-Null
+    }
+})
+
+$btnTranslatePzGameMissing.Add_Click({
+    if (-not (Test-TranslationProviderConfigured)) {
+        Show-MissingTranslationProviderMessage
+        return
+    }
+
+    if ($script:PzGameEntries.Count -eq 0) {
+        [System.Windows.MessageBox]::Show(
+            $(if ($script:UiLanguage -eq "en") { "Scan Project Zomboid first." } else { "Najpierw zeskanuj Project Zomboid." }),
+            "Project Zomboid Game"
+        ) | Out-Null
+        return
+    }
+
+    $src = Get-PzSelectedLanguage $cmbPzGameSourceLang
+    $dst = Get-PzSelectedLanguage $cmbPzGameTargetLang
+    if ($null -eq $src -or $null -eq $dst) { return }
+    if (-not (Require-TranslationProvider)) { return }
+
+    $missing = @($script:PzGameEntries | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.Translation) })
+    if ($missing.Count -eq 0) {
+        Set-PzGameWorkProgress 100 $(if ($script:UiLanguage -eq "en") { "No missing translations found." } else { "Brak brakujących tłumaczeń." })
+        return
+    }
+
+    $done = 0
+    $failed = 0
+    $total = $missing.Count
+
+    if ($null -ne $btnTranslatePzGameMissing) { $btnTranslatePzGameMissing.IsEnabled = $false }
+
+    try {
+        Set-PzGameWorkProgress 0 $(if ($script:UiLanguage -eq "en") {
+            "Starting automatic translation: 0 / $total"
+        } else {
+            "Rozpoczynanie automatycznego tłumaczenia: 0 / $total"
+        })
+
+        foreach ($e in $missing) {
+            try {
+                $e.Translation = Translate-PzText ([string]$e.Source) ([string]$src.Code) ([string]$dst.Code)
+                $done++
+            } catch {
+                $failed++
+            }
+
+            $processed = $done + $failed
+            $pct = [int](100 * ($processed / [math]::Max(1,$total)))
+
+            if (($processed % 5) -eq 0 -or $processed -eq 1 -or $processed -eq $total) {
+                Set-PzGameWorkProgress $pct $(if ($script:UiLanguage -eq "en") {
+                    "Translating: $processed / $total | OK: $done | errors: $failed"
+                } else {
+                    "Tłumaczenie: $processed / $total | OK: $done | błędy: $failed"
+                })
+            }
+
+            if (($processed % 25) -eq 0) {
+                try { [void](Save-PzGameCheckpoint "auto-translate-$processed") } catch {}
+            }
+
+            if (($processed % 20) -eq 0) {
+                Refresh-PzGameGrid
+                try { Apply-PzGameFilter } catch {}
+                [System.Windows.Forms.Application]::DoEvents()
+            }
+        }
+
+        try { [void](Save-PzGameCheckpoint "auto-translate-complete") } catch {}
+
+        Refresh-PzGameGrid
+        try { Apply-PzGameFilter } catch {}
+
+        Set-PzGameWorkProgress 100 $(if ($script:UiLanguage -eq "en") {
+            "Automatic translation complete: $done / $total | errors: $failed"
+        } else {
+            "Automatyczne tłumaczenie zakończone: $done / $total | błędy: $failed"
+        })
+    }
+    finally {
+        if ($null -ne $btnTranslatePzGameMissing) { $btnTranslatePzGameMissing.IsEnabled = $true }
+    }
+})
+
+$btnExportPzGameCsv.Add_Click({
+    if ($script:PzGameEntries.Count -eq 0) { return }
+    $dlg = New-Object Microsoft.Win32.SaveFileDialog
+    $dlg.Filter = "CSV (*.csv)|*.csv"
+    $src = Get-PzSelectedLanguage $cmbPzGameSourceLang
+    $dst = Get-PzSelectedLanguage $cmbPzGameTargetLang
+    $srcCode = if ($null -ne $src) { [string]$src.Code } else { "source" }
+    $dstCode = if ($null -ne $dst) { [string]$dst.Code } else { "target" }
+    $dlg.FileName = "Project-Zomboid-Game-$srcCode-$dstCode.csv"
+
+    if ($dlg.ShowDialog() -eq $true) {
+        try {
+            Export-PzGameCsv $dlg.FileName
+            $txtPzGameStatus.Text = if ($script:UiLanguage -eq "en") { "CSV exported: $($dlg.FileName)" } else { "CSV zapisany: $($dlg.FileName)" }
+        } catch {
+            $latest = Join-Path (Get-ToolkitAutosaveDirectory) "latest-pz-game.csv"
+            $msg = "$($_.Exception.Message)`n`nCheckpoint: $latest"
+            [System.Windows.MessageBox]::Show($msg, "Project Zomboid Game CSV") | Out-Null
+        }
+    }
+})
+
+$btnImportPzGameCsv.Add_Click({
+    if ($script:PzGameEntries.Count -eq 0) { return }
+    $dlg = New-Object Microsoft.Win32.OpenFileDialog
+    $dlg.Filter = "CSV (*.csv)|*.csv"
+    if ($dlg.ShowDialog() -eq $true) {
+        try {
+            $updated = Import-PzGameCsv $dlg.FileName
+            $txtPzGameStatus.Text = if ($script:UiLanguage -eq "en") {
+                "Imported translations for $updated entries."
+            } else {
+                "Zaimportowano tłumaczenia dla $updated wpisów."
+            }
+        } catch {
+            [System.Windows.MessageBox]::Show($_.Exception.Message, "Project Zomboid Game CSV") | Out-Null
+        }
+    }
+})
+
+$cmbPzGameSourceLang.Add_SelectionChanged({
+    if (-not [string]::IsNullOrWhiteSpace([string]$txtPzGamePath.Text) -and (Test-Path -LiteralPath $txtPzGamePath.Text)) {
+        try { Scan-PzGame $txtPzGamePath.Text | Out-Null } catch {}
+    }
+})
+
+$cmbPzGameTargetLang.Add_SelectionChanged({
+    if (-not [string]::IsNullOrWhiteSpace([string]$txtPzGamePath.Text) -and (Test-Path -LiteralPath $txtPzGamePath.Text)) {
+        try { Scan-PzGame $txtPzGamePath.Text | Out-Null } catch {}
+    }
+})
+
+$txtPzGamePath.Add_Drop({
+    param($sender,$e)
+    try {
+        if ($e.Data.GetDataPresent([System.Windows.DataFormats]::FileDrop)) {
+            $paths = @($e.Data.GetData([System.Windows.DataFormats]::FileDrop))
+            if ($paths.Count -gt 0 -and (Test-Path -LiteralPath $paths[0] -PathType Container)) {
+                $txtPzGamePath.Text = [string]$paths[0]
+            }
+        }
+    } catch {}
+})
+
+$btnDetectPzMods.Add_Click({
+    try {
+        $script:PzDetectedMods = @(Find-PzInstalledMods)
+        Refresh-PzDetectedModsCombo
+
+        if ($null -ne $lblPzDetectedCount) {
+            $lblPzDetectedCount.Text = if ($script:UiLanguage -eq "en") {
+                "Mods: $($script:PzDetectedMods.Count)"
+            } else {
+                "Mody: $($script:PzDetectedMods.Count)"
+            }
+        }
+
+        if ($script:PzDetectedMods.Count -eq 0) {
+            $txtPzStatus.Text = if ($script:UiLanguage -eq "en") {
+                "No translatable Project Zomboid mods were detected."
+            } else {
+                "Nie wykryto modów Project Zomboid zawierających pliki tłumaczeń."
+            }
+            return
+        }
+
+        $txtPzStatus.Text = if ($script:UiLanguage -eq "en") {
+            "Detected $($script:PzDetectedMods.Count) mods. [LOC OK] means supported localization files were found; [NO LOC] means none were detected."
+        } else {
+            "Wykryto $($script:PzDetectedMods.Count) modów. [LOC OK] = znaleziono pliki lokalizacji, [NO LOC] = brak obsługiwanych plików lokalizacji."
+        }
+    } catch {
+        [System.Windows.MessageBox]::Show($_.Exception.Message, "Project Zomboid Mod") | Out-Null
+    }
+})
+
+$cmbPzDetectedMods.Add_SelectionChanged({
+    try {
+        if ($null -eq $cmbPzDetectedMods.SelectedItem) { return }
+        $path = [string]$cmbPzDetectedMods.SelectedItem.Tag
+        if (-not [string]::IsNullOrWhiteSpace($path)) {
+            $txtPzModPath.Text = $path
+            $txtPzStatus.Text = if ($script:UiLanguage -eq "en") {
+                "Selected mod: $($cmbPzDetectedMods.SelectedItem.Content)"
+            } else {
+                "Wybrano mod: $($cmbPzDetectedMods.SelectedItem.Content)"
+            }
+        }
+    } catch {}
+})
+
+
+$btnChoosePzMod.Add_Click({
+    $picked = Show-ModernFolderPicker `
+        $(if ($script:UiLanguage -eq "en") { "Choose a Project Zomboid mod or Workshop item folder" } else { "Wybierz folder moda lub elementu Workshop Project Zomboid" }) `
+        $txtPzModPath.Text
+    if ($picked) { $txtPzModPath.Text = $picked }
+})
+
+$btnOpenPzModFolder.Add_Click({
+    if (Test-Path -LiteralPath $txtPzModPath.Text) {
+        Start-Process explorer.exe -ArgumentList "`"$($txtPzModPath.Text)`""
+    }
+})
+
+$btnScanPzMod.Add_Click({
+    try {
+        Scan-PzMod $txtPzModPath.Text | Out-Null
+    } catch {
+        [System.Windows.MessageBox]::Show($_.Exception.Message, "Project Zomboid Mod") | Out-Null
+    }
+})
+
+$btnTranslatePzMissing.Add_Click({
+    if (-not (Test-TranslationProviderConfigured)) {
+        Show-MissingTranslationProviderMessage
+        return
+    }
+
+    if ($script:PzEntries.Count -eq 0) {
+        [System.Windows.MessageBox]::Show(
+            $(if ($script:UiLanguage -eq "en") { "Scan a Project Zomboid mod first." } else { "Najpierw zeskanuj mod Project Zomboid." }),
+            "Project Zomboid Mod"
+        ) | Out-Null
+        return
+    }
+
+    $src = Get-PzSelectedLanguage $cmbPzSourceLang
+    $dst = Get-PzSelectedLanguage $cmbPzTargetLang
+    if ($null -eq $src -or $null -eq $dst) { return }
+    if (-not (Require-TranslationProvider)) { return }
+
+    $missing = @($script:PzEntries | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.Translation) })
+    $done = 0
+    foreach ($e in $missing) {
+        try {
+            $e.Translation = Translate-PzText ([string]$e.Source) ([string]$src.Code) ([string]$dst.Code)
+            $done++
+            if (($done % 25) -eq 0) {
+                try {
+                    $autosaveDir = Get-ToolkitAutosaveDirectory
+                    $path = Join-Path $autosaveDir "latest-pz-mod.csv"
+                    Export-PzCsv $path
+                } catch {}
+            }
+            if (($done % 20) -eq 0) {
+                Refresh-PzGrid
+                [System.Windows.Forms.Application]::DoEvents()
+            }
+        } catch {}
+    }
+    Refresh-PzGrid
+    $txtPzStatus.Text = if ($script:UiLanguage -eq "en") {
+        "Automatic translation completed: $done / $($missing.Count)."
+    } else {
+        "Automatyczne tlumaczenie zakonczone: $done / $($missing.Count)."
+    }
+})
+
+
+$btnBuildPzTranslation.Add_Click({
+    if ($script:PzEntries.Count -eq 0) {
+        [System.Windows.MessageBox]::Show(
+            $(if ($script:UiLanguage -eq "en") { "Scan a Project Zomboid mod first." } else { "Najpierw zeskanuj mod Project Zomboid." }),
+            "Project Zomboid Mod"
+        ) | Out-Null
+        return
+    }
+
+    $picked = ""
+    if (-not [string]::IsNullOrWhiteSpace([string]$script:PzEditingTranslationPath) -and
+        (Test-Path -LiteralPath $script:PzEditingTranslationPath)) {
+        $picked = Split-Path $script:PzEditingTranslationPath -Parent
+    } else {
+        $defaultPzMods = Get-PzLocalInstallRoot
+        $picked = Show-ModernFolderPicker `
+            $(if ($script:UiLanguage -eq "en") { "Choose where to create the Project Zomboid translation mod" } else { "Wybierz folder, w którym utworzyć mod tłumaczeniowy Project Zomboid" }) `
+            $defaultPzMods
+
+        if (-not $picked) { return }
+    }
+
+    try {
+        $out = Build-PzTranslationMod $picked
+        $btnCopyPzWorkshop.IsEnabled = $true
+        if ($null -ne $btnOpenPzWorkshopStage) { $btnOpenPzWorkshopStage.IsEnabled = $true }
+        $txtPzStatus.Text = if ($script:UiLanguage -eq "en") {
+            "Project Zomboid translation mod created: $out"
+        } else {
+            "Utworzono mod tłumaczeniowy Project Zomboid: $out"
+        }
+        [System.Windows.MessageBox]::Show(
+            $(if ($script:UiLanguage -eq "en") { "Translation mod created.`n`n$out" } else { "Mod tłumaczeniowy gotowy.`n`n$out" }),
+            "Project Zomboid Mod"
+        ) | Out-Null
+    } catch {
+        [System.Windows.MessageBox]::Show($_.Exception.Message,"Project Zomboid Mod") | Out-Null
+    }
+})
+
+
+$btnOpenPzWorkshopStage.Add_Click({
+    if ([string]::IsNullOrWhiteSpace([string]$script:PzLastWorkshopStagePath) -or
+        -not (Test-Path -LiteralPath $script:PzLastWorkshopStagePath)) {
+        return
+    }
+
+    Start-Process explorer.exe -ArgumentList "`"$($script:PzLastWorkshopStagePath)`""
+})
+
+$btnCopyPzWorkshop.Add_Click({
+    if ([string]::IsNullOrWhiteSpace([string]$script:PzLastWorkshopDescriptionPath) -or
+        -not (Test-Path -LiteralPath $script:PzLastWorkshopDescriptionPath)) {
+        return
+    }
+
+    try {
+        $content = Get-Content -LiteralPath $script:PzLastWorkshopDescriptionPath -Raw -Encoding UTF8
+        [System.Windows.Clipboard]::SetText($content)
+        $txtPzStatus.Text = if ($script:UiLanguage -eq "en") {
+            "Workshop description copied to clipboard."
+        } else {
+            "Opis Workshop skopiowany do schowka."
+        }
+    } catch {
+        [System.Windows.MessageBox]::Show($_.Exception.Message,"Workshop") | Out-Null
+    }
+})
+
+$btnExportPzCsv.Add_Click({
+    if ($script:PzEntries.Count -eq 0) { return }
+    $dlg = New-Object Microsoft.Win32.SaveFileDialog
+    $dlg.Filter = "CSV (*.csv)|*.csv"
+    $dlg.DefaultExt = ".csv"
+    $dlg.FileName = "Project-Zomboid-Translation.csv"
+    if ($dlg.ShowDialog() -eq $true) {
+        try {
+            Export-PzCsv $dlg.FileName
+            $txtPzStatus.Text = if ($script:UiLanguage -eq "en") { "CSV exported: $($dlg.FileName)" } else { "CSV zapisany: $($dlg.FileName)" }
+        } catch {
+            [System.Windows.MessageBox]::Show($_.Exception.Message, "Project Zomboid CSV") | Out-Null
+        }
+    }
+})
+
+$btnImportPzCsv.Add_Click({
+    if ($script:PzEntries.Count -eq 0) { return }
+    $dlg = New-Object Microsoft.Win32.OpenFileDialog
+    $dlg.Filter = "CSV (*.csv)|*.csv"
+    if ($dlg.ShowDialog() -eq $true) {
+        try {
+            $updated = Import-PzCsv $dlg.FileName
+            $txtPzStatus.Text = if ($script:UiLanguage -eq "en") {
+                "Imported translations for $updated entries."
+            } else {
+                "Zaimportowano tlumaczenia dla $updated wpisow."
+            }
+        } catch {
+            [System.Windows.MessageBox]::Show($_.Exception.Message, "Project Zomboid CSV") | Out-Null
+        }
+    }
+})
+
+$cmbPzSourceLang.Add_SelectionChanged({
+    if (-not [string]::IsNullOrWhiteSpace([string]$txtPzModPath.Text) -and (Test-Path -LiteralPath $txtPzModPath.Text)) {
+        try { Scan-PzMod $txtPzModPath.Text | Out-Null } catch {}
+    }
+})
+
+$cmbPzTargetLang.Add_SelectionChanged({
+    if (-not [string]::IsNullOrWhiteSpace([string]$txtPzModPath.Text) -and (Test-Path -LiteralPath $txtPzModPath.Text)) {
+        try { Scan-PzMod $txtPzModPath.Text | Out-Null } catch {}
+    }
+})
+
+$txtPzModPath.Add_Drop({
+    param($sender,$e)
+    try {
+        if ($e.Data.GetDataPresent([System.Windows.DataFormats]::FileDrop)) {
+            $paths = @($e.Data.GetData([System.Windows.DataFormats]::FileDrop))
+            if ($paths.Count -gt 0 -and (Test-Path -LiteralPath $paths[0] -PathType Container)) {
+                $txtPzModPath.Text = [string]$paths[0]
+            }
+        }
+    } catch {}
+})
+
 $btnDetectKenshi.Add_Click({
     $detected = Get-KenshiInstallPath
     if ($detected) {
@@ -5959,8 +8793,29 @@ $btnExport.Add_Click({
     if ($script:Entries.Count -eq 0) { return }
     $dlg = New-Object Microsoft.Win32.SaveFileDialog
     $dlg.Filter = "CSV (*.csv)|*.csv"
-    $dlg.FileName = "translation_pl.csv"
-    if ($dlg.ShowDialog()) { Export-ToolkitCsv $dlg.FileName; $txtStatus.Text = "CSV zapisany: $($dlg.FileName)" }
+    $sourceCode = Get-SelectedSourceLanguageCode
+    $targetCode = Get-SelectedTargetLanguageCode
+    $dlg.FileName = "translation_$sourceCode-$targetCode.csv"
+
+    if ($dlg.ShowDialog()) {
+        try {
+            Export-ToolkitCsv $dlg.FileName
+            $txtStatus.Text = if ($script:UiLanguage -eq "en") {
+                "CSV saved: $($dlg.FileName)"
+            } else {
+                "CSV zapisany: $($dlg.FileName)"
+            }
+        } catch {
+            $autosave = Join-Path (Get-ToolkitAutosaveDirectory) "latest.csv"
+            $msg = if ($script:UiLanguage -eq "en") {
+                "CSV export failed.`n`n$($_.Exception.Message)`n`nYour translation checkpoint is preserved here:`n$autosave"
+            } else {
+                "Eksport CSV nie powiódł się.`n`n$($_.Exception.Message)`n`nCheckpoint tłumaczenia został zachowany tutaj:`n$autosave"
+            }
+            [System.Windows.MessageBox]::Show($msg, "Mod Translation Toolkit") | Out-Null
+            $txtStatus.Text = $msg
+        }
+    }
 })
 
 $btnImport.Add_Click({
@@ -6029,6 +8884,11 @@ $btnValidate.Add_Click({
 $btnApiSettings.Add_Click({ Show-TranslationApiSettingsWindow })
 
 $btnAutoTranslate.Add_Click({
+    if (-not (Test-TranslationProviderConfigured)) {
+        Show-MissingTranslationProviderMessage
+        return
+    }
+
     if ($script:Entries.Count -eq 0) { return }
 
     if (-not (Require-TranslationProvider)) { return }
@@ -6070,6 +8930,7 @@ $btnAutoTranslate.Add_Click({
     foreach ($e in $todo) {
         try { $e.Translation = Translate-Configured $e.Source $src $dst } catch { $failed++ }
         $done++
+            if (($done % 25) -eq 0) { [void](Save-ToolkitTranslationCheckpoint "auto-translate-$done") }
 
         if (($done % 5) -eq 0 -or $done -eq $total) {
             if ($script:UiLanguage -eq "en") {
@@ -6199,7 +9060,9 @@ $btnBuild.Add_Click({
             }
             [System.Windows.MessageBox]::Show("Zapisano zmiany.`n`n$out","Mod Translation Toolkit")
         } catch {
-            [System.Windows.MessageBox]::Show($_.Exception.Message,"Błąd")
+            $autosave = Join-Path (Get-ToolkitAutosaveDirectory) "latest.csv"
+            $msg = "$($_.Exception.Message)`n`nCheckpoint: $autosave"
+            [System.Windows.MessageBox]::Show($msg,"Błąd")
         }
         return
     }
@@ -6224,7 +9087,9 @@ $btnBuild.Add_Click({
             }
             [System.Windows.MessageBox]::Show("Gotowe.`n`n$out","Mod Translation Toolkit")
         } catch {
-            [System.Windows.MessageBox]::Show($_.Exception.Message,"Błąd")
+            $autosave = Join-Path (Get-ToolkitAutosaveDirectory) "latest.csv"
+            $msg = "$($_.Exception.Message)`n`nCheckpoint: $autosave"
+            [System.Windows.MessageBox]::Show($msg,"Błąd")
         }
     }
 })
@@ -6634,12 +9499,14 @@ function Export-RimWorldGameCsv([string]$path) {
     $sourceCode = if ($null -ne $sourceLang) { [string]$sourceLang.Code } else { "" }
     $targetCode = if ($null -ne $targetLang) { [string]$targetLang.Code } else { "" }
 
-    $rows |
-        Select-Object Module,Type,File,Key,Source,Translation,
-            @{N="SourceLanguage";E={$sourceCode}},
-            @{N="TargetLanguage";E={$targetCode}} |
-        Microsoft.PowerShell.Utility\Export-Csv -LiteralPath $path -NoTypeInformation -Encoding UTF8 -Delimiter ';'
+    $exportRows = @(
+        $rows |
+            Select-Object Module,Type,File,Key,Source,Translation,
+                @{N="SourceLanguage";E={$sourceCode}},
+                @{N="TargetLanguage";E={$targetCode}}
+    )
 
+    Write-ToolkitCsvAtomic $exportRows $path
     return $true
 }
 
@@ -6708,11 +9575,28 @@ function Import-RimWorldGameCsv([string]$path) {
         }
     }
 
-    $rimWorldGameGrid.ItemsSource = $null
-    $rimWorldGameGrid.ItemsSource = @($current)
-    $rimWorldGameGrid.Items.Refresh()
+    $script:RimWorldGameEntries = @($current)
+    Apply-RimWorldGameFilter
 
     return $updated
+}
+
+function Apply-RimWorldGameFilter {
+    if ($null -eq $rimWorldGameGrid) { return }
+    $mode="all"
+    try { if ($null -ne $cmbRimWorldGameFilter.SelectedItem) { $mode=[string]$cmbRimWorldGameFilter.SelectedItem.Tag } } catch {}
+    $all=@($script:RimWorldGameEntries)
+    $items=switch ($mode) {
+        "missing" { @($all | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.Translation) }) }
+        "translated" { @($all | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.Translation) -and ([string]$_.Source).Trim() -cne ([string]$_.Translation).Trim() }) }
+        "identical" { @($all | Where-Object { -not [string]::IsNullOrWhiteSpace([string]$_.Translation) -and ([string]$_.Source).Trim() -ceq ([string]$_.Translation).Trim() }) }
+        "suspicious" { @($all | Where-Object { [string]::IsNullOrWhiteSpace([string]$_.Translation) -or ([string]$_.Source).Trim() -ceq ([string]$_.Translation).Trim() }) }
+        default { $all }
+    }
+    $rimWorldGameGrid.ItemsSource=$null
+    $rimWorldGameGrid.ItemsSource=@($items)
+    $rimWorldGameGrid.Items.Refresh()
+    Set-ControlTextSafe $lblRimWorldGameCount $(if ($script:UiLanguage -eq "en") { "Entries: $($items.Count) / $($all.Count)" } else { "Wpisy: $($items.Count) / $($all.Count)" })
 }
 
 function Scan-RimWorldGameSelection {
@@ -6812,8 +9696,8 @@ function Scan-RimWorldGameSelection {
         )
     }
 
-    $rimWorldGameGrid.ItemsSource = $null
-    $rimWorldGameGrid.ItemsSource = @($result)
+    $script:RimWorldGameEntries = @($result)
+    Apply-RimWorldGameFilter
 
     if ($rimWorldGameGrid.Columns.Count -ge 5) {
         $rimWorldGameGrid.Columns[3].Header = [string]$sourceLang.NativeName
@@ -6910,6 +9794,10 @@ $btnRwGameDlcOnly.Add_Click({
         if ([string]$i.Content -ine "Core") { $i.IsSelected = $true }
     }
 })
+$cmbRimWorldGameFilter.Add_SelectionChanged({
+    try { Apply-RimWorldGameFilter } catch {}
+})
+
 $btnScanRimWorldGame.Add_Click({
     try {
         $btnScanRimWorldGame.IsEnabled = $false

@@ -1,5 +1,383 @@
 # Changelog
 
+## 0.10.8 Experimental - 2026-08-05
+
+### Project Zomboid Workshop builder hotfix
+- Fixed `Get-PzWorkshopStageRoot is not recognized` when building a Project Zomboid translation mod.
+- The helper was referenced by `New-PzWorkshopStage` but was missing from the packaged script.
+- Restored `Get-PzWorkshopStageRoot`.
+- Workshop staging again defaults to `%USERPROFILE%\Zomboid\Workshop`.
+- The folder is created automatically when missing.
+- Added static dependency checks for all Workshop helpers used by the PZ builder.
+
+## 0.10.7 Experimental - 2026-08-05
+
+### Startup order hotfix
+- Fixed startup `CommandNotFoundException` for `Apply-CentralUiLanguage`.
+- The function existed, but an early call occurred before PowerShell had reached its function definition.
+- Removed the premature call after Workshop/creator profile initialization.
+- UI localization is still applied later through `Apply-UiLanguage`, after all related functions are defined.
+- v0.10.6 execution-policy and startup diagnostics remain unchanged.
+
+## 0.10.6 Experimental - 2026-08-05
+
+### PowerShell execution-policy compatibility
+- Startup logs confirmed `PSSecurityException: running scripts is disabled on this system`.
+- Launcher now uses process-scoped `-ExecutionPolicy RemoteSigned` instead of `Bypass`.
+- No system-wide or CurrentUser execution-policy setting is changed.
+- Toolkit still removes Mark of the Web only from its own main PS1 file.
+- `Bypass` and `Unrestricted` remain absent from the package.
+- Updated `START_DEBUG.ps1` to launch the main Toolkit process under the same `RemoteSigned` policy.
+
+### Why RemoteSigned
+- `Restricted` blocks all `.ps1` execution, including local Toolkit scripts.
+- `RemoteSigned` preserves PowerShell policy checks while allowing a deliberately unblocked local script.
+- The setting applies only to the spawned Toolkit PowerShell process.
+
+## 0.10.5 Experimental - 2026-08-05
+
+### Startup diagnostics
+- Reworked startup error capture so PowerShell exceptions are written directly to `STARTUP_ERROR.log`.
+- Log now includes exception message, type, script stack trace, source position, category and FullyQualifiedErrorId.
+- Rebuilt `START_DEBUG.ps1` to show and save the same detailed diagnostics.
+- Launcher still avoids `ExecutionPolicy Bypass`.
+- Mark-of-the-Web handling remains limited to Toolkit's own PS1.
+
+## 0.10.4 Experimental - 2026-08-05
+
+### VBScript launcher hotfix
+- Fixed Windows Script Host error `800A01F5` / `Niedozwolone przypisanie: 'log'`.
+- Renamed the launcher error-log variable from `log` to `logFile`.
+- `log` conflicts with VBScript's built-in `Log()` function.
+- The launcher remains BOM-free and does not use `ExecutionPolicy Bypass`.
+- Existing Mark-of-the-Web handling and startup diagnostics are preserved.
+
+## 0.10.3 Experimental - 2026-08-05
+
+### Windows startup reliability
+- Fixed the launcher silently doing nothing after `ExecutionPolicy Bypass` was removed.
+- The launcher now removes Mark of the Web only from Toolkit's own `ModTranslationToolkit.ps1` using `Unblock-File`.
+- No PowerShell execution-policy override is used.
+- Hidden startup remains enabled.
+- Launcher now waits for the PowerShell startup result.
+- If startup fails, `STARTUP_ERROR.log` is created and a visible message shows the exit code.
+- `START_DEBUG.ps1` also unblocks the Toolkit script before diagnostic startup.
+
+## 0.10.2 Experimental - 2026-08-05
+
+### Windows Script Host launcher fix
+- Fixed `Mod Translation Toolkit.vbs` failing immediately with Windows Script Host error `800A0408`.
+- The launcher is now written without a UTF-8 BOM, using Windows-compatible ANSI/CP1252 encoding.
+- `ExecutionPolicy Bypass` remains removed.
+- Hidden startup, `-NoProfile`, and `-STA` remain unchanged.
+- Package folder version updated to v0.10.2.
+
+## 0.10.1 Experimental - 2026-08-05
+
+### Defender-friendly launcher hotfix
+- Removed `-ExecutionPolicy Bypass` from the hidden VBS -> PowerShell launcher.
+- Removed any remaining `ExecutionPolicy Bypass` / `Unrestricted` launcher arguments from packaged scripts.
+- Kept `-NoProfile`, `-STA`, and hidden-window startup so the normal user experience remains unchanged.
+- Renamed the packaged top-level folder to match v0.10.1 instead of carrying an older internal version name.
+- Rebuilt both the user package and GitHub-ready package.
+
+### Security note
+- Toolkit does not disable Defender, add exclusions, create scheduled tasks, install persistence, or use `Invoke-Expression`.
+- API secrets remain stored locally using Windows DPAPI.
+
+## 0.10.0 Experimental - 2026-08-05
+
+### Project Zomboid B42 workflow
+- First Workshop publication now uses empty `id=`.
+- Stored translation Workshop ID can be reused for later updates.
+- `poster.png` is a dedicated Polish-flag image for the in-game mod list.
+- `preview.png` remains a separate Workshop preview with a Polish badge.
+- B42 Workshop staging validation and root/versioned `mod.info` fixes remain enabled.
+- Generated PZ translations remain reopenable and editable.
+
+### RimWorld Game filters
+- Added All, Missing translation, Translated, Identical source/target and Suspicious filters.
+- Filtered count is shown against the full scan result.
+
+### Packaging
+- Updated README, changelog and release notes.
+- Prepared normal and GitHub-ready packages.
+
+## 0.9.8 Experimental - 2026-08-05
+
+### Project Zomboid Workshop uploader hotfix
+- Fixed Workshop upload failing with Steam/PZ `result=9` when the staging package had no root `mod.info`.
+- Workshop packages now always contain `Contents\mods\<ModName>\mod.info` in addition to versioned B42 metadata.
+- Ensures a root `poster.png` beside the root `mod.info`.
+- Added a Workshop staging validator for `Contents`, `Contents\mods`, `preview.png`, `workshop.txt`, root `mod.info`, and versioned `mod.info`.
+
+## 0.9.7 Experimental - 2026-08-04
+
+### Project Zomboid Workshop staging package
+- Fixed the in-game Workshop uploader error: `Contents/ in the selected folder does not exist`.
+- Toolkit now creates a separate Workshop-ready staging package for every PZ translation build.
+- Workshop staging path defaults to `%USERPROFILE%\Zomboid\Workshop\<Translation Name>`.
+- Generated Workshop structure:
+  - `Contents\mods\<Translation Mod>\...`
+  - `preview.png`
+  - `workshop.txt`
+- The playable local mod remains in `%USERPROFILE%\Zomboid\mods`.
+- Added `Open Workshop package` button.
+- Workshop preview is generated as a 256x256 PNG from the translation poster.
+- `workshop.txt` contains title, description, Translation tag and initial public visibility.
+
+### Important workflow split
+- `Zomboid\mods` = local testing / playable mod.
+- `Zomboid\Workshop\<item>` = folder selected in Project Zomboid's Create/Update Workshop Item screen.
+
+## 0.9.6 Experimental - 2026-08-04
+
+### Reopen and update Project Zomboid translation mods
+- Fixed Toolkit-generated PZ translation mods not being readable after creation.
+- Translation packages are recognized through `ModTranslationToolkit.json`.
+- Source strings are loaded from the original mod.
+- Target strings are loaded from the Toolkit-generated translation mod.
+- Existing translations are matched back into the editor.
+- Original mod path can be resolved from stored path, Workshop ID, or mod ID.
+- Rebuilding an opened translation updates the same folder instead of creating another package.
+- Existing B42 structure, dependency, poster and description fixes are preserved.
+
+## 0.9.5 Experimental - 2026-08-04
+
+### Project Zomboid poster / preview fix
+- Fixed translation mods being detected by Project Zomboid while showing a blank preview.
+- `poster.png` is now placed beside every generated/mirrored `mod.info`, not only in the outer mod folder.
+- The root poster is retained for packaging and Workshop use.
+
+### Project Zomboid description cleanup
+- Generated `mod.info` descriptions are now normalized to exactly one description line.
+- Source description lines are removed before writing the translation description.
+- Prevents repeated `translation. Created with Mod Translation Toolkit.` text in the in-game mod browser.
+
+## 0.9.4 Experimental - 2026-08-04
+
+### Project Zomboid B42 translation builder structure fix
+- Reworked the Project Zomboid translation builder to mirror the selected source mod's real B42 container structure.
+- Detects actual `mod.info` locations instead of assuming one layout.
+- Supports root `mod.info`, `common\mod.info`, and numeric B42 roots such as `42\mod.info` or `42.21\mod.info`.
+- Prefers the newest numeric B42 `mod.info` when several versions exist.
+- Mirrors detected version/common roots into the generated translation mod.
+- Updates every mirrored `mod.info` with the translation name, unique ID and dependency on the original mod.
+- Localization output is written to the exact relative source content root instead of a reconstructed guessed root.
+- Original subscribed Workshop files are never modified.
+
+### Local installation
+- The build folder dialog now defaults to `%USERPROFILE%\Zomboid\mods`.
+- The local mods directory is created automatically when possible.
+- This avoids treating `steamapps\workshop\content\108600` as a manual-install destination.
+
+## 0.9.3 Experimental - 2026-08-04
+
+### Project Zomboid Game automatic translation progress
+- Added live 0-100% progress for `Translate missing`.
+- Shows processed / total, successful translations and errors.
+- UI is refreshed throughout long translation runs so the window no longer appears frozen.
+- Translation button is disabled while the job is running and restored in `finally`.
+- Autosave checkpoints every 25 processed entries are preserved.
+- Grid/filter refresh happens periodically during long jobs.
+- Individual translation errors are counted and skipped instead of silently making the whole job appear stuck.
+
+## 0.9.2 Experimental - 2026-08-04
+
+### Translation provider readiness hotfix
+- Fixed LibreTranslate being reported as `none` even when it was correctly saved and working in API settings.
+- The readiness check now uses `Get-TranslationProviderSettings`, the exact same persisted settings source used by `Translate-Configured`.
+- Removed dependency on transient API dialog controls and the stale `$script:TranslationSettings` assumption.
+- Self-hosted LibreTranslate is considered ready when its saved endpoint exists; an API key remains optional.
+- Diagnostic messages can show the saved LibreTranslate endpoint without exposing API secrets.
+
+## 0.9.1 Experimental - 2026-08-04
+
+### Project Zomboid translation mod builder
+- Added `Build translation mod` to the Project Zomboid Mod profile.
+- Generates a separate translation mod instead of modifying the original Workshop item.
+- Preserves Project Zomboid B42/common translation-root structure.
+- Builds only the selected target-language localization folder.
+- JSON output preserves the original source JSON structure and case-sensitive keys.
+- Legacy TXT localization output is also supported.
+- Generates `mod.info` with a unique translation mod ID.
+- Adds `require=<original mod id>` when the original `mod.info` provides an ID.
+- Stores original mod/workshop metadata in `ModTranslationToolkit.json`.
+- Generates `SteamWorkshopDescription.txt`.
+- Added `Copy Workshop description`.
+- Generates `poster.png` by copying the original poster and overlaying a Polish flag.
+- Creates a fallback MTT translation poster when the source mod has no poster.
+
+### Safety
+- Original Workshop mod files are never modified by the builder.
+- Existing autosave, provider validation, PZ markup validation and atomic CSV export remain enabled.
+
+## 0.9.0 Experimental - 2026-08-04
+
+### Project Zomboid Game scan progress
+- Added a visible 0-100% progress bar to Project Zomboid Game scanning.
+- Added live stage text for source scan, target scan, indexing, matching and coverage.
+- Source and target file scanning updates progress while files are being processed.
+- The Scan button is disabled while scanning to prevent duplicate scans.
+- UI events are pumped during progress updates so the window remains responsive.
+- Progress reaches 100% only after matching and coverage calculation complete.
+
+### Scan stages
+- 0-5% preparation
+- 5-40% source language files
+- 40-75% target language files
+- 75-85% indexing
+- 85-95% matching
+- 95-100% coverage/finalization
+
+## 0.8.9 Experimental - 2026-08-04
+
+### Translation provider detection
+- Fixed a false "no provider configured" result when a provider was visibly selected in the API settings.
+- Provider detection now reads the actual selected ComboBox item and falls back to persisted settings.
+- Provider display labels are normalized to internal names.
+- LibreTranslate is considered configured when a valid endpoint exists, even without an API key.
+- Missing-provider messages now include the provider Toolkit thinks is selected.
+
+### Project Zomboid Game scan performance
+- Coverage no longer rescans English and target localization files a second time.
+- Source/target maps are cached during the main scan and reused for coverage.
+- Target-only count is computed from the same cached scan.
+- This removes a large amount of duplicate work on 40k+ entry Project Zomboid installations.
+
+## 0.8.8 Experimental - 2026-08-04
+
+### Translation provider handling
+- Automatic translation now stops immediately when no provider is configured.
+- Added a clear PL/EN message directing the user to API / Translation.
+- Prevents entering long translation loops when API/provider configuration is missing.
+
+### Project Zomboid markup safety
+- Added dedicated protection for Project Zomboid angle-bracket markup such as `<H1>`, `<LEFT>`, `<ORANGE>`, `<SIZE:...>`, `<IMAGE:...>` and `<SETX:...>`.
+- Markup is restored 1:1 after translation.
+- Added post-translation integrity validation.
+- Translations containing unrecovered `__MTTPH...` or `__PZTAG...` tokens are rejected instead of silently accepted.
+
+### Project Zomboid mod discovery
+- The detected-mod list now includes all detected local/Workshop mods, not only mods with localization roots.
+- Mods are marked `[LOC OK]` or `[NO LOC]`.
+- Workshop ID and `mod.info` names are preserved.
+
+### Project Zomboid Game coverage
+- Added coverage counters for missing target, identical source/target, translated and target-only entries.
+- Added filters for all, missing target, identical source/target and suspicious/untranslated entries.
+- Makes it possible to detect formally present target entries that still contain unchanged English text.
+
+## 0.8.7 Experimental - 2026-08-03
+
+### Project Zomboid Mod selection
+- Fixed Workshop detection treating the entire `content\108600` tree as one combined mod.
+- `Detect mods` now enumerates individual Project Zomboid mods.
+- Added a detected-mod selector to the Project Zomboid Mod profile.
+- Selecting a mod updates the active mod path automatically.
+- `Scan mod` now scans only the selected mod instead of combining translations from every subscribed Workshop item.
+- Reads `mod.info` where available to show a human-friendly mod name and mod ID.
+- Workshop items retain their PublishedFileId in the selector.
+- Local `%USERPROFILE%\Zomboid\mods` entries appear in the same selector.
+- Only mods containing a detectable translation root are listed.
+
+## 0.8.6 Experimental - 2026-08-03
+
+### Project Zomboid Game JSON fix
+- Replaced PowerShell 5.1 `ConvertFrom-Json` in the Project Zomboid reader with .NET `JavaScriptSerializer`.
+- Fixes valid localization files containing keys that differ only by capitalization, such as `Farming_Lemongrass` and `Farming_LemonGrass`.
+
+### Project Zomboid Mod detection
+- Added `Wykryj mody` / `Detect mods`.
+- Detects `%USERPROFILE%\Zomboid\mods`.
+- Detects `steamapps\workshop\content\108600` in all Steam libraries.
+- Understands Workshop item layout `<PublishedFileId>\mods\<mod>\...`.
+- Understands B42 versioned folders such as `42`, `42.15`, etc.
+- The scanner can now accept a root containing many mods, not only one exact mod folder.
+
+## 0.8.5 Experimental - 2026-08-03
+
+### Startup hotfix 2
+- Fixed the exact Windows PowerShell 5.1 parse error reported by `STARTUP_ERROR.log`.
+- The autosave metadata counter had a misplaced parenthesis around `Where-Object` / `.Count`.
+- The corrected expression now parses before the UI starts.
+- Project Zomboid TXT + JSON support, Steam detection, autosave and crash-safe CSV export are preserved.
+- `START_DEBUG.ps1` remains included for future startup diagnostics.
+
+## 0.8.4 Experimental - 2026-08-03
+
+### Startup hotfix
+- Fixed a Windows PowerShell 5.1 startup regression introduced in v0.8.3.
+- The new Project Zomboid JSON reader used constructor syntax that could break parsing before the UI opened.
+- Restored the parser-safe `New-Object -TypeName ... -ArgumentList ...` form.
+- Project Zomboid TXT + JSON support is preserved.
+- Added `START_DEBUG.ps1` to capture startup failures into `STARTUP_ERROR.log`.
+
+## 0.8.3 Experimental - 2026-08-03
+
+### Project Zomboid B42.15+ JSON localization
+- Added recursive JSON translation parsing for Project Zomboid Game and Project Zomboid Mod.
+- Keeps backward compatibility with legacy TXT localization files.
+- JSON objects and arrays are flattened into stable translation keys for matching source and target files.
+- Only string leaf values are treated as translatable text.
+- CSV exports now preserve a `Format` field (`TXT` or `JSON`) for Project Zomboid entries.
+- Existing target JSON translations are matched against English/source JSON keys.
+- UTF-8 JSON is read explicitly and invalid JSON now produces a readable file-specific error.
+- Build 42 versioned mod-folder support from v0.8.2 is preserved.
+- Autosave every 25 translated entries is preserved.
+
+### Recorded media
+- Legacy `Recorded_Media_*.txt` remains excluded from the generic TXT parser because it is a generated/special format.
+- JSON localization is no longer excluded and is now the preferred current B42 path.
+
+## 0.8.2 Experimental - 2026-08-03
+
+### Project Zomboid Game
+- Added automatic Steam-library detection for Project Zomboid.
+- Added a dedicated Project Zomboid Game profile.
+- Scans base-game `media/lua/shared/Translate/<LANG>` files.
+- Added source/target language selection.
+- Loads existing target-language entries and matches them against the source.
+- Added manual editing, automatic translation and CSV import/export.
+- Project Zomboid Game CSV export uses the crash-safe atomic writer.
+- Project Zomboid Game automatic translation creates autosave checkpoints.
+
+### Translation autosave
+- RimWorld Mod automatic translation now saves a checkpoint every 25 completed entries.
+- Project Zomboid Game automatic translation saves every 25 entries and again when translation completes.
+- Project Zomboid Mod automatic translation now also keeps an autosave CSV during long translation runs.
+
+### Current limitation
+- `Recorded_Media_*` and other structured Project Zomboid localization formats are still intentionally excluded from the generic key/value parser.
+
+## 0.8.1 Experimental - 2026-08-03
+
+### Crash-safe translation saving
+- Added an automatic translation checkpoint before RimWorld Mod CSV export.
+- Added an automatic translation checkpoint before building or updating a RimWorld translation mod.
+- Checkpoints are stored in `%APPDATA%\ModTranslationToolkit\autosave`.
+- `latest.csv` and `latest.json` always point to the newest checkpoint.
+- Up to 20 timestamped checkpoints are retained automatically.
+- RimWorld Mod CSV export now uses an atomic temporary-file workflow and verifies that the completed CSV is not empty before replacing the destination.
+- RimWorld Game and Project Zomboid CSV exports use the same atomic writer.
+- Failed RimWorld Mod export/build dialogs now point to the preserved checkpoint.
+- CSV filenames now include the selected source and target language pair.
+
+## 0.8.0 - 2026-08-03
+
+### Project Zomboid experimental foundation
+- Added a new `Project Zomboid Mod` profile.
+- Detects standard `media/lua/shared/Translate/<LANG>` translation folders.
+- Supports common Build 41 layouts and Build 42 versioned mod folders such as `42/` and `42.x/`.
+- Can scan a direct mod folder or a Workshop item containing `mods/<mod-name>/...`.
+- Added multilingual source/target selectors for common Project Zomboid language codes.
+- Loads existing target translations and shows matched entries in the translation grid.
+- Added manual editing, automatic translation, CSV export and CSV import.
+- CSV matching uses root + file + key.
+- v0.8.0 intentionally handles only standard `key = "value"` translation tables.
+- Structured formats such as `Recorded_Media_*` are intentionally skipped until a dedicated parser is added.
+- Translation-mod packaging for Project Zomboid is not enabled yet.
+
 ## 0.7.8 - 2026-08-03
 
 ### LibreTranslate UTF-8 fix
