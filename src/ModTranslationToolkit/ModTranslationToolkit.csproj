@@ -9,8 +9,8 @@
     <AssemblyName>ModTranslationToolkit</AssemblyName>
     <RootNamespace>ModTranslationToolkit</RootNamespace>
     <ApplicationIcon></ApplicationIcon>
-    <Version>1.0.0-preview.4</Version>
-    <FileVersion>1.0.0.4</FileVersion>
+    <Version>1.0.0-preview.5</Version>
+    <FileVersion>1.0.0.5</FileVersion>
     <AssemblyVersion>1.0.0.1</AssemblyVersion>
   </PropertyGroup>
 </Project>

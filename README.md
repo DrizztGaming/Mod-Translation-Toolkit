@@ -12,7 +12,7 @@ There is no PowerShell requirement at runtime.
 
 ## Current preview foundation
 
-Implemented in Preview 4:
+Implemented in Preview 5:
 
 - Native WPF application shell
 - Dark Mrokar UI
@@ -95,3 +95,19 @@ Next:
 - Resolved `SaveFileDialog` ambiguity between WinForms and Microsoft.Win32.
 - WPF file dialogs now use explicit aliases.
 - WinForms remains limited to `FolderBrowserDialog`.
+
+## Preview 5 antivirus packaging test
+
+The GitHub workflow now produces two builds and intentionally disables single-file publishing:
+
+1. `ModTranslationToolkit-v1-framework-dependent-win-x64`
+   - smallest package
+   - normal EXE + DLL files
+   - requires .NET 8 Desktop Runtime
+
+2. `ModTranslationToolkit-v1-self-contained-win-x64`
+   - includes the .NET runtime
+   - normal multi-file deployment
+   - no single-file bundling
+
+This is intended to determine whether Defender's heuristic detection is triggered by the previous self-contained single-file packaging.
