@@ -2,8 +2,8 @@
 
 A Windows desktop helper for translating game mods.
 
-> **Current stable release:** v0.7.8  
-> **Supported profiles:** RimWorld Game, RimWorld Mod, Kenshi Game
+> **Current experimental release:** v0.10.0  
+> **Supported profiles:** RimWorld Game, RimWorld Mod, Kenshi Game, Project Zomboid Game (experimental), Project Zomboid Mod (experimental)
 
 The project started as a small RimWorld translation helper and is being prepared as a multi-game toolkit with separate game profiles.
 
@@ -174,3 +174,27 @@ v0.7.6 adds guarded repair for common mojibake in LibreTranslate responses, such
 
 ## LibreTranslate UTF-8 handling
 v0.7.8 reads LibreTranslate HTTP responses as raw bytes and decodes them explicitly as UTF-8 before JSON parsing. This avoids Windows PowerShell 5.1 legacy-codepage corruption of translated text.
+
+
+## Project Zomboid Mod
+v0.8.0 introduces an experimental Project Zomboid mod profile. It scans standard `media/lua/shared/Translate/<LANG>` tables, recognizes common B41 layouts and B42 versioned mod folders, matches existing target translations, and supports manual editing, automatic translation and CSV workflows.
+
+The first implementation intentionally skips structured translation formats such as `Recorded_Media_*` and does not build a Project Zomboid translation package yet.
+
+
+## Crash-safe checkpoints
+v0.8.1 Experimental saves the current RimWorld Mod translation state before CSV export and before building/updating a translation mod. Recovery snapshots are stored under `%APPDATA%\ModTranslationToolkit\autosave`, with `latest.csv` pointing to the newest saved state.
+
+
+## Project Zomboid Game
+v0.8.2 Experimental can detect Project Zomboid across Steam libraries and scan the base game's standard `media/lua/shared/Translate/<LANG>` localization tables. It supports source/target selection, existing translation matching, manual editing, automatic translation and CSV import/export.
+
+Current B42 JSON localization files are supported. Legacy `Recorded_Media_*.txt` remains excluded until a dedicated parser is added.
+
+
+### B42.15+ JSON
+Project Zomboid Game and Mod profiles now scan both legacy TXT localization files and current UTF-8 JSON localization files. JSON objects/arrays are flattened into stable keys so existing translations can be matched and exported through the same grid/CSV workflow.
+
+
+### Project Zomboid translation mod builder
+The experimental Project Zomboid Mod profile can build a separate localization-only mod with `mod.info`, target-language JSON/TXT files, an automatically generated poster, Workshop description and original-mod metadata. The original subscribed mod is never modified.
