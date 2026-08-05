@@ -12,7 +12,7 @@ There is no PowerShell requirement at runtime.
 
 ## Current preview foundation
 
-Implemented in Preview 3:
+Implemented in Preview 4:
 
 - Native WPF application shell
 - Dark Mrokar UI
@@ -88,3 +88,10 @@ Next:
 - Added explicit standard-library imports across the v1 codebase.
 - Reduced reliance on SDK implicit usings.
 - Extended CI source audit to catch missing IO imports before compilation.
+
+## Preview 4 build fixes
+
+- Resolved `OpenFileDialog` ambiguity between WinForms and Microsoft.Win32.
+- Resolved `SaveFileDialog` ambiguity between WinForms and Microsoft.Win32.
+- WPF file dialogs now use explicit aliases.
+- WinForms remains limited to `FolderBrowserDialog`.

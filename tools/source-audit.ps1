@@ -29,6 +29,15 @@ foreach ($rel in $ioFiles) {
     }
 }
 
+
+$mainWindow = Get-Content (Join-Path $root "src\ModTranslationToolkit\MainWindow.xaml.cs") -Raw
+if ($mainWindow -notmatch "using OpenFileDialog = Microsoft\.Win32\.OpenFileDialog;") {
+    $errors += "MainWindow.xaml.cs is missing OpenFileDialog alias"
+}
+if ($mainWindow -notmatch "using SaveFileDialog = Microsoft\.Win32\.SaveFileDialog;") {
+    $errors += "MainWindow.xaml.cs is missing SaveFileDialog alias"
+}
+
 if ($errors.Count -gt 0) {
     $errors | ForEach-Object { Write-Error $_ }
     exit 1

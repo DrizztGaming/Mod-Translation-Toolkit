@@ -10,6 +10,8 @@ using Forms = System.Windows.Forms;
 using ModTranslationToolkit.Models;
 using ModTranslationToolkit.Services;
 using ModTranslationToolkit.ViewModels;
+using OpenFileDialog = Microsoft.Win32.OpenFileDialog;
+using SaveFileDialog = Microsoft.Win32.SaveFileDialog;
 
 namespace ModTranslationToolkit;
 
