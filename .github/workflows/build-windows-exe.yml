@@ -1,0 +1,48 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - dotnet
+    tags:
+      - "v1.*"
+  pull_request:
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Restore
+        run: dotnet restore ModTranslationToolkit.sln
+
+      - name: Build
+        run: dotnet build ModTranslationToolkit.sln -c Release --no-restore
+
+      - name: Publish Windows x64 EXE
+        run: >
+          dotnet publish src/ModTranslationToolkit/ModTranslationToolkit.csproj
+          -c Release
+          -r win-x64
+          --self-contained true
+          -p:PublishSingleFile=true
+          -p:IncludeNativeLibrariesForSelfExtract=true
+          -p:DebugType=None
+          -p:DebugSymbols=false
+          -o publish/win-x64
+
+      - name: Upload EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: ModTranslationToolkit-v1-win-x64
+          path: publish/win-x64/**
+          if-no-files-found: error
