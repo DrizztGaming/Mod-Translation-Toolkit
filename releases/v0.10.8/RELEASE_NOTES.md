@@ -1,7 +1,13 @@
 # Mod Translation Toolkit v0.10.8 Experimental
 
-## Project Zomboid Workshop builder hotfix
+## Custom Steam Workshop description
 
-`New-PzWorkshopStage` called `Get-PzWorkshopStageRoot`, but that helper was accidentally missing from the packaged PowerShell script.
+RimWorld Game now has a persistent Workshop-description editor.
 
-v0.10.8 restores the helper and validates Workshop-builder dependencies during packaging.
+Use **Workshop description...** to:
+- edit the Steam BBCode description,
+- save a custom description,
+- reload the generated default,
+- remove the saved custom description.
+
+The saved text is used when generating `SteamWorkshopDescription.txt`.

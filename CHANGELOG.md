@@ -1,89 +1,120 @@
 # Changelog
 
-## 0.10.8 Experimental - 2026-08-05
+## 0.10.9 Experimental - 2026-08-06
 
-### Project Zomboid Workshop builder hotfix
-- Fixed `Get-PzWorkshopStageRoot is not recognized` when building a Project Zomboid translation mod.
-- The helper was referenced by `New-PzWorkshopStage` but was missing from the packaged script.
-- Restored `Get-PzWorkshopStageRoot`.
-- Workshop staging again defaults to `%USERPROFILE%\Zomboid\Workshop`.
-- The folder is created automatically when missing.
-- Added static dependency checks for all Workshop helpers used by the PZ builder.
+### Custom Workshop description for RimWorld Mod
+- Added **Workshop description...** to the RimWorld Mod workflow.
+- Added the same multiline BBCode editor available in RimWorld Game.
+- Custom descriptions are saved per original mod/packageId, so different translation projects can keep different Workshop text.
+- Added **Load default**, **Delete saved custom**, **Cancel**, and **Save description** actions.
+- `Build-SteamWorkshopDescription` now uses the saved custom text when present.
+- Default generation remains available at any time.
+- Includes the RimWorld Game Workshop editor from v0.10.8.
 
-## 0.10.7 Experimental - 2026-08-05
+## 0.10.8 Experimental - 2026-08-06
 
-### Startup order hotfix
-- Fixed startup `CommandNotFoundException` for `Apply-CentralUiLanguage`.
-- The function existed, but an early call occurred before PowerShell had reached its function definition.
-- Removed the premature call after Workshop/creator profile initialization.
-- UI localization is still applied later through `Apply-UiLanguage`, after all related functions are defined.
-- v0.10.6 execution-policy and startup diagnostics remain unchanged.
+### Custom Steam Workshop description for RimWorld Game
+- Added **Workshop description...** next to the RimWorld Game translation-mod builder.
+- Added a multiline BBCode editor for the Workshop description.
+- Custom description is saved persistently in Toolkit settings and reused on future builds.
+- Added **Load default** to regenerate the current default description.
+- Added **Delete saved custom** to return permanently to automatic defaults.
+- `SteamWorkshopDescription.txt` now uses the saved custom description when present.
+- The default description automatically lists currently selected/scanned Core/DLC modules.
+- Includes the Windows PowerShell 5.1 startup parser hotfix from v0.10.7.
 
-## 0.10.6 Experimental - 2026-08-05
+## 0.10.7 Experimental - 2026-08-06
 
-### PowerShell execution-policy compatibility
-- Startup logs confirmed `PSSecurityException: running scripts is disabled on this system`.
-- Launcher now uses process-scoped `-ExecutionPolicy RemoteSigned` instead of `Bypass`.
-- No system-wide or CurrentUser execution-policy setting is changed.
-- Toolkit still removes Mark of the Web only from its own main PS1 file.
-- `Bypass` and `Unrestricted` remain absent from the package.
-- Updated `START_DEBUG.ps1` to launch the main Toolkit process under the same `RemoteSigned` policy.
+### Windows PowerShell 5.1 startup parser hotfix
+- Fixed a startup `ParseException` in `Get-RimWorldGameInheritanceSummary`.
+- Replaced unsafe `"$name: ..."` interpolation with `"${name}: ..."`.
+- This restores startup on Windows PowerShell 5.1.
+- Includes the RimWorld Game translation mod builder from v0.10.6.
 
-### Why RemoteSigned
-- `Restricted` blocks all `.ps1` execution, including local Toolkit scripts.
-- `RemoteSigned` preserves PowerShell policy checks while allowing a deliberately unblocked local script.
-- The setting applies only to the spawned Toolkit PowerShell process.
+## 0.10.6 Experimental - 2026-08-06
+
+### RimWorld Game translation mod builder
+- Added **Build translation mod** to RimWorld Game.
+- Core + selected DLC can now be packaged as a normal RimWorld mod instead of CSV-only output.
+- Uses all scanned entries, independent of the active grid filter.
+- Writes translated Keyed and DefInjected entries to `Languages/<TargetLanguage>`.
+- Detects duplicate Core/DLC keys with conflicting translations and stops the build instead of silently overwriting data.
+- Equal duplicate keys are safely deduplicated.
+- Adds About.xml, packageId, modVersion, supported RimWorld version, DLC dependencies/loadAfter, Preview.png, SteamWorkshopDescription.txt and TranslationBuildReport.txt.
+- Output defaults to the game's `Mods` folder when available.
+- Includes ParentName inheritance for both RimWorld Mod and Core/DLC workflows from v0.10.4/v0.10.5.
 
 ## 0.10.5 Experimental - 2026-08-05
 
-### Startup diagnostics
-- Reworked startup error capture so PowerShell exceptions are written directly to `STARTUP_ERROR.log`.
-- Log now includes exception message, type, script stack trace, source position, category and FullyQualifiedErrorId.
-- Rebuilt `START_DEBUG.ps1` to show and save the same detailed diagnostics.
-- Launcher still avoids `ExecutionPolicy Bypass`.
-- Mark-of-the-Web handling remains limited to Toolkit's own PS1.
+### RimWorld Core/DLC ParentName inheritance
+- Applied the v0.10.4 ParentName inheritance logic to the RimWorld Game workflow.
+- Core and DLC Def scanning now uses the same two-pass model as RimWorld Mod.
+- Abstract/template Defs with `Name` are indexed even without `defName`.
+- Concrete Core/DLC Defs inherit supported localizable fields recursively through `ParentName`.
+- Direct child fields override inherited fields.
+- Cycle protection is preserved.
+- Generated source entries use the concrete child key, e.g. `SomeChildDef.description`.
+- Inherited entry counts are tracked per module/DLC.
+- Includes all fixes from v0.10.1 through v0.10.4.
 
 ## 0.10.4 Experimental - 2026-08-05
 
-### VBScript launcher hotfix
-- Fixed Windows Script Host error `800A01F5` / `Niedozwolone przypisanie: 'log'`.
-- Renamed the launcher error-log variable from `log` to `logFile`.
-- `log` conflicts with VBScript's built-in `Log()` function.
-- The launcher remains BOM-free and does not use `ExecutionPolicy Bypass`.
-- Existing Mark-of-the-Web handling and startup diagnostics are preserved.
+### RimWorld ParentName inheritance fix
+- Reworked `Scan-Defs` into a two-pass scanner.
+- Abstract/template Defs with a `Name` attribute are now indexed even when they have no `defName`.
+- Concrete Defs now inherit supported localizable fields through `ParentName`.
+- Inheritance is recursive, so multi-level parent chains are supported.
+- Direct child values always override inherited values.
+- Cycle protection prevents broken ParentName chains from hanging the scanner.
+- Inherited fields are emitted under the concrete child key, e.g. `Tav_1x1Table.description`.
+- TranslationBuildReport now records inherited field counts and Tavern-specific inheritance diagnostics.
+- Includes v0.10.1 placeholder, v0.10.2 builder verification, and v0.10.3 grid reconciliation fixes.
 
 ## 0.10.3 Experimental - 2026-08-05
 
-### Windows startup reliability
-- Fixed the launcher silently doing nothing after `ExecutionPolicy Bypass` was removed.
-- The launcher now removes Mark of the Web only from Toolkit's own `ModTranslationToolkit.ps1` using `Unblock-File`.
-- No PowerShell execution-policy override is used.
-- Hidden startup remains enabled.
-- Launcher now waits for the PowerShell startup result.
-- If startup fails, `STARTUP_ERROR.log` is created and a visible message shows the exit code.
-- `START_DEBUG.ps1` also unblocks the Toolkit script before diagnostic startup.
+### RimWorld grid-to-builder reconciliation fix
+- Fixed a pipeline case where a DefInjected row could be visible/editable in the Toolkit grid but absent from `$script:Entries` at build time.
+- Pending DataGrid edits are now committed before building.
+- Visible grid rows are reconciled back into the canonical entry list.
+- Missing DefInjected metadata is recovered from the row key/path when possible.
+- Entry identity now uses canonical DefInjected output paths.
+- Added a pre-write invariant that stops the build if a canonical DefInjected row disappears before XML generation.
+- TranslationBuildReport now records reconciliation statistics.
+- Added explicit diagnostics for `Tav_1x1Table*` and `Tav_1x2Table*`.
+- Includes v0.10.1 placeholder fixes and v0.10.2 post-write XML verification.
 
 ## 0.10.2 Experimental - 2026-08-05
 
-### Windows Script Host launcher fix
-- Fixed `Mod Translation Toolkit.vbs` failing immediately with Windows Script Host error `800A0408`.
-- The launcher is now written without a UTF-8 BOM, using Windows-compatible ANSI/CP1252 encoding.
-- `ExecutionPolicy Bypass` remains removed.
-- Hidden startup, `-NoProfile`, and `-STA` remain unchanged.
-- Package folder version updated to v0.10.2.
+### RimWorld DefInjected builder fix
+- Fixed translated DefInjected rows being visible in the Toolkit but missing from the generated XML.
+- DefInjected output paths are now canonicalized from `DefType`.
+- Duplicate file/key rows now prefer the entry containing an explicit translation instead of blindly keeping the first row.
+- Added post-write XML verification for every generated language file.
+- A build now fails visibly if any selected translation key is missing from the generated XML.
+- TranslationBuildReport now includes the number of XML files/entries written and verification result.
+- Includes the v0.10.1 placeholder integrity fixes.
+
+### Regression testcase
+- Verified the builder logic against the reported `Tav_1x1Table.description` / `Tav_1x2Table.description` case.
 
 ## 0.10.1 Experimental - 2026-08-05
 
-### Defender-friendly launcher hotfix
-- Removed `-ExecutionPolicy Bypass` from the hidden VBS -> PowerShell launcher.
-- Removed any remaining `ExecutionPolicy Bypass` / `Unrestricted` launcher arguments from packaged scripts.
-- Kept `-NoProfile`, `-STA`, and hidden-window startup so the normal user experience remains unchanged.
-- Renamed the packaged top-level folder to match v0.10.1 instead of carrying an older internal version name.
-- Rebuilt both the user package and GitHub-ready package.
+### RimWorld placeholder hotfix
+- Fixed internal `__MTTPH0__`, `__MTTPH1__`, and similar tokens leaking into translations.
+- Replaced legacy underscore tokens with provider-resistant alphanumeric tokens.
+- Placeholder restoration now tolerates provider-added spaces and letter-case changes.
+- Added strict placeholder count and order validation after every API translation.
+- Literal `\n` sequences are preserved exactly as structural text.
+- Damaged provider responses are rejected instead of saved as valid translations.
+- Placeholder validation automatically repairs recoverable legacy token leaks.
+- Build validation detects unresolved internal tokens and changed placeholder order.
 
-### Security note
-- Toolkit does not disable Defender, add exclusions, create scheduled tasks, install persistence, or use `Invoke-Expression`.
-- API secrets remain stored locally using Windows DPAPI.
+## 0.10.0 public-package documentation update - 2026-08-05
+
+- Added Microsoft Defender false-positive guidance.
+- Added source-verification and SHA-256 instructions.
+- Added a ready-to-copy Microsoft sample-submission template.
+- Application code and version remain v0.10.0 Experimental.
 
 ## 0.10.0 Experimental - 2026-08-05
 

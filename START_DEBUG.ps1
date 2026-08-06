@@ -1,46 +1,33 @@
 ﻿$ErrorActionPreference = "Stop"
-
-$scriptPath = Join-Path $PSScriptRoot "src\RimWorld\ModTranslationToolkit.ps1"
-$logPath = Join-Path $PSScriptRoot "STARTUP_ERROR.log"
+$root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$log = Join-Path $root "STARTUP_ERROR.log"
+$main = Join-Path $root "src\RimWorld\ModTranslationToolkit.ps1"
 
 try {
-    Unblock-File -LiteralPath $scriptPath -ErrorAction SilentlyContinue
-
-    $argList = @(
-        "-NoProfile",
-        "-ExecutionPolicy", "RemoteSigned",
-        "-STA",
-        "-File", $scriptPath
-    )
-
-    $process = Start-Process -FilePath "powershell.exe" -ArgumentList $argList -Wait -PassThru
-    if ($process.ExitCode -ne 0) {
-        throw "Toolkit PowerShell process exited with code $($process.ExitCode)."
+    if (Test-Path -LiteralPath $log) {
+        Remove-Item -LiteralPath $log -Force -ErrorAction SilentlyContinue
     }
+    & $main
 }
 catch {
-    $details = @(
-        "Mod Translation Toolkit startup failed.",
-        "Timestamp: $(Get-Date -Format o)",
-        "Message: $($_.Exception.Message)",
-        "Type: $($_.Exception.GetType().FullName)",
-        "ScriptStackTrace: $($_.ScriptStackTrace)",
-        "Position: $($_.InvocationInfo.PositionMessage)",
-        "Category: $($_.CategoryInfo)",
-        "FullyQualifiedErrorId: $($_.FullyQualifiedErrorId)"
-    ) -join [Environment]::NewLine
+    $lines = New-Object System.Collections.ArrayList
+    [void]$lines.Add("Mod Translation Toolkit startup error")
+    [void]$lines.Add("Time: $((Get-Date).ToString('o'))")
+    [void]$lines.Add("")
+    [void]$lines.Add("Exception:")
+    [void]$lines.Add($_.Exception.ToString())
+    [void]$lines.Add("")
+    [void]$lines.Add("Position:")
+    [void]$lines.Add([string]$_.InvocationInfo.PositionMessage)
+    [void]$lines.Add("")
+    [void]$lines.Add("Script stack:")
+    [void]$lines.Add([string]$_.ScriptStackTrace)
 
-    [System.IO.File]::WriteAllText(
-        $logPath,
-        $details,
-        (New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false))
-    )
+    [System.IO.File]::WriteAllLines($log, [string[]]$lines, [System.Text.Encoding]::UTF8)
 
     Write-Host ""
-    Write-Host "=== MOD TRANSLATION TOOLKIT STARTUP ERROR ===" -ForegroundColor Red
-    Write-Host $details
+    Write-Host "Startup failed. Log written to:"
+    Write-Host $log
     Write-Host ""
-    Write-Host "Log: $logPath"
     Read-Host "Press Enter to close"
-    exit 1
 }

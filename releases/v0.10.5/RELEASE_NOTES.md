@@ -1,13 +1,16 @@
 # Mod Translation Toolkit v0.10.5 Experimental
 
-## Startup diagnostics rebuild
+## RimWorld Core and DLC inheritance fix
 
-If startup fails, Toolkit now records the real PowerShell exception instead of only an exit code.
+The RimWorld Game scanner now resolves inherited localizable fields through `ParentName`, just like the RimWorld Mod scanner introduced in v0.10.4.
 
-`STARTUP_ERROR.log` contains:
-- exception message
-- exception type
-- script stack trace
-- source position / line information
-- category
-- FullyQualifiedErrorId
+This applies to:
+- Core
+- Royalty
+- Ideology
+- Biotech
+- Anomaly
+- Odyssey
+- any other detected official module that uses the same Def structure
+
+Supported localizable fields remain the same as the existing scanner, but inherited values are now materialized under the concrete child Def key.

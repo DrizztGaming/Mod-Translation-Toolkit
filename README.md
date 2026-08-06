@@ -2,7 +2,7 @@
 
 A Windows desktop helper for translating game mods.
 
-> **Current experimental release:** v0.10.8  
+> **Current experimental release:** v0.10.9  
 > **Supported profiles:** RimWorld Game, RimWorld Mod, Kenshi Game, Project Zomboid Game (experimental), Project Zomboid Mod (experimental)
 
 The project started as a small RimWorld translation helper and is being prepared as a multi-game toolkit with separate game profiles.
@@ -103,6 +103,27 @@ Planned profile architecture:
 - `launcher/` - hidden Windows launcher
 - `docs/` - project notes
 - `releases/` - release packaging notes
+
+## Microsoft Defender false-positive notice
+
+Some Windows Defender installations may heuristically classify the downloaded ZIP or launcher as `Trojan:Script/Wacatac.B!ml`. Testing on other Windows systems, including Windows 10, has not reproduced the detection consistently.
+
+This project is distributed as readable PowerShell/WPF source. It does not intentionally:
+
+- disable Microsoft Defender,
+- create Defender exclusions,
+- install scheduled tasks or persistence,
+- inject code into other processes,
+- download and execute external programs,
+- use `Invoke-Expression` / `IEX`.
+
+A detection should still be treated seriously. Do not disable antivirus protection globally. Verify that the downloaded file matches the published SHA-256 checksum and review the source before running it.
+
+Suspected false positives can be submitted to Microsoft through the Microsoft Security Intelligence sample-submission portal:
+
+`https://www.microsoft.com/en-us/wdsi/filesubmission`
+
+Choose the option indicating that the file was incorrectly detected and include the detection name, Toolkit version, download source and SHA-256 checksum.
 
 ## License
 

@@ -1,7 +1,11 @@
 # Mod Translation Toolkit v0.10.2 Experimental
 
-## Windows Script Host launcher hotfix
+## RimWorld DefInjected builder fix
 
-v0.10.1 removed `ExecutionPolicy Bypass`, but the launcher was accidentally saved with a UTF-8 BOM. Windows Script Host treated the BOM as an invalid first character and failed with error `800A0408`.
+Fixes a case where a translated `.description` was visible in the Toolkit table but was not written to the generated `ThingDef.xml`.
 
-v0.10.2 writes the `.vbs` launcher as BOM-free Windows-compatible text.
+The builder now:
+- canonicalizes DefInjected output paths,
+- prefers translated duplicate rows,
+- verifies generated XML against the selected entries,
+- stops the build if a key is missing.

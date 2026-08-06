@@ -1,11 +1,15 @@
 # Mod Translation Toolkit v0.10.6 Experimental
 
-## Restricted PowerShell policy compatibility
+## RimWorld Game translation mod builder
 
-Diagnostics confirmed that some Windows systems use the `Restricted` PowerShell execution policy, which blocks `.ps1` files entirely.
+RimWorld Game can now build a normal translation mod from Core and the selected DLC modules.
 
-v0.10.6 launches Toolkit with process-scoped `RemoteSigned`:
-- no global policy change
-- no CurrentUser policy change
-- no `Bypass`
-- downloaded Toolkit script is explicitly unblocked before launch
+The generated mod contains:
+- About/About.xml
+- About/Preview.png
+- Languages/<target>/Keyed
+- Languages/<target>/DefInjected
+- SteamWorkshopDescription.txt
+- TranslationBuildReport.txt
+
+The builder detects conflicting duplicate keys across Core/DLC and refuses to silently overwrite them.

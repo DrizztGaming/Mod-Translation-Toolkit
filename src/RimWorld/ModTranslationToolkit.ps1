@@ -7,7 +7,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-$AppVersion = "0.10.8"
+$AppVersion = "0.10.9"
 $script:UiLanguage = "pl"
 $script:Entries = New-Object System.Collections.ArrayList
 $script:Mods = New-Object System.Collections.ArrayList
@@ -22,6 +22,7 @@ $script:OriginalDownloadUrl = ""
 $script:OriginalAuthor = ""
 $script:LastWorkshopDescriptionPath = ""
 $script:LanguageCoverage = @{}
+$script:RimWorldGameInheritedCounts = @{}
 $script:ExistingTranslations = @{}
 $script:EditingTranslationModPath = ""
 $script:EditingTranslationPackageId = ""
@@ -66,11 +67,35 @@ function Get-TextContent($node) {
 
 function Get-Placeholders([string]$text) {
     if ([string]::IsNullOrEmpty($text)) { return @() }
-    $tokens = @()
-    $tokens += ([regex]::Matches($text, '\{\d+(?::[^}]*)?\}') | ForEach-Object Value)
-    $tokens += ([regex]::Matches($text, '%[sdif]') | ForEach-Object Value)
-    $tokens += ([regex]::Matches($text, '\\n') | ForEach-Object Value)
-    return @($tokens | Sort-Object)
+
+    $found = New-Object System.Collections.ArrayList
+    $patterns = @(
+        '\{\d+(?::[^}]*)?\}',
+        '%(?:\d+\$)?[sdif]',
+        '\\r\\n',
+        '\\n',
+        '<[^>]+>'
+    )
+
+    foreach ($pattern in $patterns) {
+        foreach ($m in [regex]::Matches($text, $pattern)) {
+            [void]$found.Add([pscustomobject]@{
+                Index = $m.Index
+                Length = $m.Length
+                Value = [string]$m.Value
+            })
+        }
+    }
+
+    $result = New-Object System.Collections.ArrayList
+    $lastEnd = -1
+    foreach ($m in @($found | Sort-Object Index, Length)) {
+        if ($m.Index -lt $lastEnd) { continue }
+        [void]$result.Add([string]$m.Value)
+        $lastEnd = $m.Index + $m.Length
+    }
+
+    return @($result)
 }
 
 
@@ -664,29 +689,98 @@ function Require-TranslationProvider {
 }
 
 function Protect-TranslationPlaceholders([string]$text, [ref]$mapRef) {
-    $map = @{}
-    $counter = 0
-    $protected = $text
-    $patterns = @('\{\d+(?::[^}]*)?\}', '%[sdif]', '\\n', '<[^>]+>')
+    $map = [ordered]@{}
+    $protected = [string]$text
+    $tokens = @(Get-Placeholders $text)
 
-    foreach ($pattern in $patterns) {
-        $matches = [regex]::Matches($protected, $pattern)
-        foreach ($m in @($matches | Sort-Object Index -Descending)) {
-            $key = "__MTTPH$counter`__"
-            $map[$key] = $m.Value
-            $protected = $protected.Remove($m.Index, $m.Length).Insert($m.Index, $key)
-            $counter++
-        }
+    for ($i = 0; $i -lt $tokens.Count; $i++) {
+        $value = [string]$tokens[$i]
+
+        # Alphanumeric tokens survive Google, DeepL and LibreTranslate more
+        # reliably than the legacy __MTTPH0__ form.
+        $key = "ZXQMTTPH{0:D4}QXZ" -f $i
+        $map[$key] = $value
+
+        $escaped = [regex]::Escape($value)
+        $protected = [regex]::Replace(
+            $protected,
+            $escaped,
+            [System.Text.RegularExpressions.MatchEvaluator]{
+                param($m)
+                return $key
+            },
+            1
+        )
     }
+
     $mapRef.Value = $map
     return $protected
 }
 
 function Restore-TranslationPlaceholders([string]$text, $map) {
-    $result = $text
-    foreach ($k in $map.Keys) { $result = $result.Replace($k, $map[$k]) }
+    $result = [string]$text
+    if ($null -eq $map) { return $result }
+
+    foreach ($k in @($map.Keys)) {
+        $value = [string]$map[$k]
+        $number = ([regex]::Match([string]$k, '\d{4}')).Value
+
+        # Translation providers sometimes add spaces or change letter case.
+        $pattern = "Z\s*X\s*Q\s*M\s*T\s*T\s*P\s*H\s*0*$number\s*Q\s*X\s*Z"
+        if (-not [regex]::IsMatch($result, $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)) {
+            return $null
+        }
+
+        $result = [regex]::Replace(
+            $result,
+            $pattern,
+            [System.Text.RegularExpressions.MatchEvaluator]{
+                param($m)
+                return $value
+            },
+            [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+        )
+    }
+
     return $result
 }
+
+function Test-TranslationPlaceholderIntegrity([string]$source, [string]$translation) {
+    if ($null -eq $translation) { return $false }
+
+    if ($translation -match '__MTTPH\d+__' -or
+        $translation -match 'ZXQ\s*MTTPH\s*\d+\s*QXZ') {
+        return $false
+    }
+
+    $src = @(Get-Placeholders $source)
+    $dst = @(Get-Placeholders $translation)
+
+    if ($src.Count -ne $dst.Count) { return $false }
+
+    for ($i = 0; $i -lt $src.Count; $i++) {
+        if ([string]$src[$i] -cne [string]$dst[$i]) {
+            return $false
+        }
+    }
+
+    return $true
+}
+
+function Finalize-TranslatedText([string]$source, [string]$translated, $map) {
+    $restored = Restore-TranslationPlaceholders $translated $map
+
+    if ($null -eq $restored) {
+        throw "Translation provider changed or removed a protected placeholder."
+    }
+
+    if (-not (Test-TranslationPlaceholderIntegrity $source $restored)) {
+        throw "Placeholder validation failed after translation."
+    }
+
+    return $restored
+}
+
 
 function Translate-GoogleCloud([string]$text,[string]$sourceLang,[string]$targetLang,$settings) {
     $map = $null
@@ -704,7 +798,7 @@ function Translate-GoogleCloud([string]$text,[string]$sourceLang,[string]$target
         -Method Post -Headers $headers -ContentType "application/json; charset=utf-8" -Body $body -TimeoutSec 30
 
     $translated = [System.Net.WebUtility]::HtmlDecode([string]$resp.data.translations[0].translatedText)
-    return (Restore-TranslationPlaceholders $translated $map)
+    return (Finalize-TranslatedText $text $translated $map)
 }
 
 function Translate-DeepL([string]$text,[string]$sourceLang,[string]$targetLang,$settings) {
@@ -724,7 +818,7 @@ function Translate-DeepL([string]$text,[string]$sourceLang,[string]$targetLang,$
         -ContentType "application/x-www-form-urlencoded" -Body $body -TimeoutSec 30
 
     $translated = [string]$resp.translations[0].text
-    return (Restore-TranslationPlaceholders $translated $map)
+    return (Finalize-TranslatedText $text $translated $map)
 }
 
 
@@ -848,7 +942,7 @@ function Translate-LibreTranslate([string]$text,[string]$sourceLang,[string]$tar
 
         $translated = [string]$resp.translatedText
         $translated = Repair-TranslationMojibake $translated
-        return (Restore-TranslationPlaceholders $translated $map)
+        return (Finalize-TranslatedText $text $translated $map)
     } catch [System.Net.WebException] {
         $err = $_.Exception
         if ($null -ne $err.Response) {
@@ -2779,21 +2873,6 @@ function Set-PzPublishedWorkshopId([string]$translationModPath, [string]$worksho
     } catch { return $false }
 }
 
-
-function Get-PzWorkshopStageRoot {
-    $root = Join-Path $env:USERPROFILE "Zomboid\Workshop"
-
-    if (-not (Test-Path -LiteralPath $root)) {
-        try {
-            New-Item -ItemType Directory -Path $root -Force | Out-Null
-        } catch {
-            throw "Could not create Project Zomboid Workshop staging folder: $root"
-        }
-    }
-
-    return $root
-}
-
 function New-PzWorkshopStage(
     [string]$builtModPath,
     [string]$displayName,
@@ -3965,6 +4044,77 @@ function Get-KeybindDiagnosticsText {
     return $sb.ToString()
 }
 
+function Get-DirectDefFieldNode($defNode, [string]$field) {
+    if ($null -eq $defNode -or [string]::IsNullOrWhiteSpace($field)) { return $null }
+
+    foreach ($child in @($defNode.ChildNodes)) {
+        if ($child.NodeType -ne [System.Xml.XmlNodeType]::Element) { continue }
+        if ([string]$child.Name -ceq $field) { return $child }
+    }
+
+    return $null
+}
+
+function Resolve-InheritedDefField(
+    $record,
+    [string]$field,
+    $parentIndex,
+    [System.Collections.Generic.HashSet[string]]$visited
+) {
+    if ($null -eq $record) { return $null }
+
+    $direct = Get-DirectDefFieldNode $record.Node $field
+    if ($null -ne $direct -and -not [string]::IsNullOrWhiteSpace([string]$direct.InnerText)) {
+        return [pscustomobject]@{
+            Node = $direct
+            Inherited = $false
+            From = [string]$record.DefName
+        }
+    }
+
+    $parentName = [string]$record.ParentName
+    if ([string]::IsNullOrWhiteSpace($parentName)) { return $null }
+
+    $visitKey = "$($record.DefType)|$parentName".ToLowerInvariant()
+    if ($visited.Contains($visitKey)) { return $null }
+    [void]$visited.Add($visitKey)
+
+    $parentRecord = $null
+
+    # ParentName is normally scoped to the same Def type. Prefer that.
+    $typedKey = "$($record.DefType)|$parentName".ToLowerInvariant()
+    if ($parentIndex.ContainsKey($typedKey)) {
+        $parentRecord = $parentIndex[$typedKey]
+    } else {
+        # Conservative fallback for unusual mods that reference a parent
+        # template by Name across a slightly different XML type.
+        $suffix = "|$parentName".ToLowerInvariant()
+        foreach ($k in @($parentIndex.Keys)) {
+            if ([string]$k -like "*$suffix") {
+                $parentRecord = $parentIndex[$k]
+                break
+            }
+        }
+    }
+
+    if ($null -eq $parentRecord) { return $null }
+
+    $resolved = Resolve-InheritedDefField $parentRecord $field $parentIndex $visited
+    if ($null -eq $resolved) { return $null }
+
+    return [pscustomobject]@{
+        Node = $resolved.Node
+        Inherited = $true
+        From = $(if (-not [string]::IsNullOrWhiteSpace([string]$parentRecord.TemplateName)) {
+            [string]$parentRecord.TemplateName
+        } elseif (-not [string]::IsNullOrWhiteSpace([string]$parentRecord.DefName)) {
+            [string]$parentRecord.DefName
+        } else {
+            [string]$parentName
+        })
+    }
+}
+
 function Scan-Defs([string]$modPath) {
     $fields = @(
         "label","description","jobString","reportString","gerund",
@@ -3975,27 +4125,59 @@ function Scan-Defs([string]$modPath) {
     $countBefore = $script:Entries.Count
     $roots = @(Get-DefRoots $modPath)
 
+    # First pass: collect every Def node, including abstract/template defs that
+    # have Name= but no defName. Those are required for ParentName inheritance.
+    $records = New-Object System.Collections.ArrayList
+    $parentIndex = @{}
+
     foreach ($defs in $roots) {
         if (-not (Test-Path $defs)) { continue }
 
         Get-ChildItem -LiteralPath $defs -Recurse -Filter *.xml -File -ErrorAction SilentlyContinue | ForEach-Object {
+            $file = $_
             try {
-                [xml]$doc = Get-Content -LiteralPath $_.FullName -Raw -Encoding UTF8
+                [xml]$doc = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8
                 if ($null -eq $doc.DocumentElement -or $doc.DocumentElement.Name -ne "Defs") { return }
 
-                foreach ($def in $doc.DocumentElement.ChildNodes) {
+                foreach ($def in @($doc.DocumentElement.ChildNodes)) {
                     if ($def.NodeType -ne [System.Xml.XmlNodeType]::Element) { continue }
 
-                    $defNameNode = $def.SelectSingleNode("defName")
-                    if ($null -eq $defNameNode -or [string]::IsNullOrWhiteSpace($defNameNode.InnerText)) { continue }
+                    $defType = [string]$def.Name
+                    $defName = ""
+                    $defNameNode = Get-DirectDefFieldNode $def "defName"
+                    if ($null -ne $defNameNode -and -not [string]::IsNullOrWhiteSpace([string]$defNameNode.InnerText)) {
+                        $defName = [string]$defNameNode.InnerText.Trim()
+                    }
 
-                    $defType = $def.Name
-                    $defName = $defNameNode.InnerText.Trim()
+                    $templateName = ""
+                    try {
+                        if ($null -ne $def.Attributes["Name"]) {
+                            $templateName = [string]$def.Attributes["Name"].Value
+                        }
+                    } catch {}
 
-                    foreach ($field in $fields) {
-                        $node = $def.SelectSingleNode($field)
-                        if ($null -ne $node -and -not [string]::IsNullOrWhiteSpace($node.InnerText)) {
-                            Add-Entry "DefInjected" "DefInjected\$defType\$defType.xml" "$defName.$field" $node.InnerText $defType $defName $field
+                    $parentName = ""
+                    try {
+                        if ($null -ne $def.Attributes["ParentName"]) {
+                            $parentName = [string]$def.Attributes["ParentName"].Value
+                        }
+                    } catch {}
+
+                    $record = [pscustomobject]@{
+                        DefType = $defType
+                        DefName = $defName
+                        TemplateName = $templateName
+                        ParentName = $parentName
+                        Node = $def
+                        File = [string]$file.FullName
+                    }
+                    [void]$records.Add($record)
+
+                    # ParentName resolves against the XML Name attribute.
+                    if (-not [string]::IsNullOrWhiteSpace($templateName)) {
+                        $key = "$defType|$templateName".ToLowerInvariant()
+                        if (-not $parentIndex.ContainsKey($key)) {
+                            $parentIndex[$key] = $record
                         }
                     }
                 }
@@ -4003,8 +4185,43 @@ function Scan-Defs([string]$modPath) {
         }
     }
 
+    $script:InheritedDefFieldCount = 0
+    $script:InheritedDefDiagnostics = New-Object System.Collections.ArrayList
+
+    # Second pass: emit concrete defs. If a localizable field is absent on the
+    # concrete Def, resolve it recursively through ParentName.
+    foreach ($record in @($records)) {
+        if ([string]::IsNullOrWhiteSpace([string]$record.DefName)) { continue }
+
+        $defType = [string]$record.DefType
+        $defName = [string]$record.DefName
+
+        foreach ($field in $fields) {
+            $visited = New-Object 'System.Collections.Generic.HashSet[string]'
+            $resolved = Resolve-InheritedDefField $record $field $parentIndex $visited
+
+            if ($null -eq $resolved -or $null -eq $resolved.Node) { continue }
+
+            $value = [string]$resolved.Node.InnerText
+            if ([string]::IsNullOrWhiteSpace($value)) { continue }
+
+            Add-Entry "DefInjected" "DefInjected\$defType\$defType.xml" "$defName.$field" $value $defType $defName $field
+
+            if ($resolved.Inherited) {
+                $script:InheritedDefFieldCount++
+                [void]$script:InheritedDefDiagnostics.Add([pscustomobject]@{
+                    Key = "$defName.$field"
+                    DefType = $defType
+                    ParentName = [string]$record.ParentName
+                    ResolvedFrom = [string]$resolved.From
+                })
+            }
+        }
+    }
+
     return ($script:Entries.Count - $countBefore)
 }
+
 
 function Get-SearchScopeCode {
     try {
@@ -4993,40 +5210,188 @@ function Import-ToolkitCsv([string]$path) {
     Refresh-Grid
 }
 
+function Get-TranslationOutputRelativeFile($entry) {
+    if ($null -eq $entry) { return "" }
+
+    $kind = [string]$entry.Kind
+    $file = [string]$entry.File
+    $defType = [string]$entry.DefType
+
+    if ($kind -eq "DefInjected") {
+        if (-not [string]::IsNullOrWhiteSpace($defType)) {
+            return "DefInjected\$defType\$defType.xml"
+        }
+
+        # Fallback for entries loaded from existing language XML where DefType
+        # metadata may not be populated. Preserve a valid DefInjected path.
+        if ($file -match '(?i)^DefInjected[\\/]+([^\\/]+)') {
+            $typeFromPath = [string]$Matches[1]
+            return "DefInjected\$typeFromPath\$typeFromPath.xml"
+        }
+    }
+
+    return $file
+}
+
+function Select-BestTranslationEntry($entries) {
+    $items = @($entries)
+    if ($items.Count -eq 0) { return $null }
+
+    # Prefer an explicitly translated row. This matters when the same key was
+    # discovered from both a language pack and Defs/versioned roots.
+    $translated = @($items | Where-Object {
+        -not [string]::IsNullOrWhiteSpace([string]$_.Translation)
+    })
+    if ($translated.Count -gt 0) {
+        return $translated[0]
+    }
+
+    $withSource = @($items | Where-Object {
+        -not [string]::IsNullOrWhiteSpace([string]$_.Source)
+    })
+    if ($withSource.Count -gt 0) {
+        return $withSource[0]
+    }
+
+    return $items[0]
+}
+
+function Test-WrittenLanguageFile([string]$filePath, $expectedEntries) {
+    $missing = New-Object System.Collections.ArrayList
+
+    if (-not (Test-Path -LiteralPath $filePath)) {
+        foreach ($e in @($expectedEntries)) { [void]$missing.Add([string]$e.Key) }
+        return @($missing)
+    }
+
+    try {
+        [xml]$doc = Get-Content -LiteralPath $filePath -Raw -Encoding UTF8
+        if ($null -eq $doc.DocumentElement -or $doc.DocumentElement.Name -ne "LanguageData") {
+            foreach ($e in @($expectedEntries)) { [void]$missing.Add([string]$e.Key) }
+            return @($missing)
+        }
+
+        $written = @{}
+        foreach ($node in @($doc.DocumentElement.ChildNodes)) {
+            if ($node.NodeType -ne [System.Xml.XmlNodeType]::Element) { continue }
+            $written[[string]$node.Name.ToLowerInvariant()] = $true
+        }
+
+        foreach ($e in @($expectedEntries)) {
+            $key = [string]$e.Key
+            if ([string]::IsNullOrWhiteSpace($key)) { continue }
+            if (-not $written.ContainsKey($key.ToLowerInvariant())) {
+                [void]$missing.Add($key)
+            }
+        }
+    } catch {
+        foreach ($e in @($expectedEntries)) { [void]$missing.Add([string]$e.Key) }
+    }
+
+    return @($missing | Select-Object -Unique)
+}
+
 function Write-LanguageFiles([string]$outMod) {
     $targetCode = Get-SelectedTargetLanguageCode
     $targetFolder = Get-LanguageFolderName $targetCode
     $langRoot = Join-Path $outMod "Languages\$targetFolder"
     New-Item -ItemType Directory -Path $langRoot -Force | Out-Null
 
-    # Output path already encodes Keyed vs DefInjected. Grouping by File prevents
-    # multiple XML documents for the same target file.
-    $groups = $script:Entries | Group-Object File
+    # Canonicalize output paths before grouping. DefInjected entries generated
+    # from different source roots/versions must end up in one deterministic XML.
+    $prepared = New-Object System.Collections.ArrayList
+    foreach ($e in @($script:Entries)) {
+        $relativeFile = Get-TranslationOutputRelativeFile $e
+        if ([string]::IsNullOrWhiteSpace($relativeFile)) { continue }
 
-    foreach ($g in $groups) {
-        $first = $g.Group[0]
-        $dest = Join-Path $langRoot $first.File
+        [void]$prepared.Add([pscustomobject]@{
+            Entry = $e
+            RelativeFile = $relativeFile
+            KeyNorm = ([string]$e.Key).ToLowerInvariant()
+        })
+    }
+
+
+    # Build-time invariant: every canonical DefInjected row must have a prepared
+    # output row. This catches losses before any XML is written.
+    $preparedIds = @{}
+    foreach ($p in @($prepared)) {
+        $preparedIds[(Get-RimWorldEntryIdentity $p.Entry)] = $true
+    }
+
+    $lostBeforeWrite = New-Object System.Collections.ArrayList
+    foreach ($e in @($script:Entries | Where-Object { $_.Kind -eq "DefInjected" })) {
+        $id = Get-RimWorldEntryIdentity $e
+        if ([string]::IsNullOrWhiteSpace($id)) { continue }
+        if (-not $preparedIds.ContainsKey($id)) {
+            [void]$lostBeforeWrite.Add([string]$e.Key)
+        }
+    }
+
+    if ($lostBeforeWrite.Count -gt 0) {
+        throw "DefInjected reconciliation failed before XML write. Missing prepared entries: $($lostBeforeWrite.Count) :: $((@($lostBeforeWrite | Select-Object -First 20)) -join ', ')"
+    }
+
+    $fileGroups = @($prepared | Group-Object RelativeFile)
+    $allMissing = New-Object System.Collections.ArrayList
+    $writtenCount = 0
+
+    foreach ($fileGroup in $fileGroups) {
+        $relativeFile = [string]$fileGroup.Name
+        $dest = Join-Path $langRoot $relativeFile
         New-Item -ItemType Directory -Path (Split-Path $dest -Parent) -Force | Out-Null
+
+        # Group duplicate keys inside the canonical target file and deliberately
+        # select the row that actually contains a translation.
+        $selected = New-Object System.Collections.ArrayList
+        foreach ($keyGroup in @($fileGroup.Group | Group-Object KeyNorm)) {
+            $candidates = @($keyGroup.Group | ForEach-Object { $_.Entry })
+            $best = Select-BestTranslationEntry $candidates
+            if ($null -ne $best) { [void]$selected.Add($best) }
+        }
 
         $sb = New-Object System.Text.StringBuilder
         [void]$sb.AppendLine('<?xml version="1.0" encoding="utf-8"?>')
         [void]$sb.AppendLine('<LanguageData>')
 
-        $seenKeys = @{}
-        foreach ($e in $g.Group) {
-            $keyNorm = $e.Key.ToLowerInvariant()
-            if ($seenKeys.ContainsKey($keyNorm)) { continue }
-            $seenKeys[$keyNorm] = $true
+        foreach ($e in @($selected | Sort-Object Key)) {
+            $value = if ([string]::IsNullOrWhiteSpace([string]$e.Translation)) {
+                [string]$e.Source
+            } else {
+                [string]$e.Translation
+            }
 
-            $value = if ([string]::IsNullOrWhiteSpace($e.Translation)) { $e.Source } else { $e.Translation }
             if ($null -eq $value) { $value = "" }
             $value = $value.TrimEnd()
 
             [void]$sb.AppendLine("  <$($e.Key)>$(XmlEscape $value)</$($e.Key)>")
+            $writtenCount++
         }
 
         [void]$sb.AppendLine('</LanguageData>')
-        [System.IO.File]::WriteAllText($dest, $sb.ToString(), (New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false)))
+        [System.IO.File]::WriteAllText(
+            $dest,
+            $sb.ToString(),
+            (New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false))
+        )
+
+        # Never silently ship a translation mod that is missing rows visible in
+        # the Toolkit table.
+        $missing = @(Test-WrittenLanguageFile $dest $selected)
+        foreach ($key in $missing) {
+            [void]$allMissing.Add("$relativeFile :: $key")
+        }
+    }
+
+    if ($allMissing.Count -gt 0) {
+        $preview = (@($allMissing | Select-Object -First 20) -join "`r`n")
+        throw "Translation build verification failed. Missing XML entries: $($allMissing.Count)`r`n`r`n$preview"
+    }
+
+    return [pscustomobject]@{
+        Files = $fileGroups.Count
+        Entries = $writtenCount
+        Missing = 0
     }
 }
 
@@ -5267,6 +5632,183 @@ function Get-TargetLanguageInfo {
     }
 }
 
+
+function Get-RimWorldModWorkshopDescriptionPath {
+    $package = [string]$script:OriginalPackageId
+    if ([string]::IsNullOrWhiteSpace($package)) { $package = "unknown" }
+    $safe = ($package.ToLowerInvariant() -replace '[^a-z0-9_.-]','_')
+    return (Join-Path (Get-ToolkitSettingsDirectory) "rimworld-mod-workshop-$safe.txt")
+}
+
+function Get-RimWorldModWorkshopDescription {
+    $path = Get-RimWorldModWorkshopDescriptionPath
+    if (Test-Path -LiteralPath $path) {
+        try {
+            $saved = Get-Content -LiteralPath $path -Raw -Encoding UTF8
+            if (-not [string]::IsNullOrWhiteSpace($saved)) {
+                return [string]$saved
+            }
+        } catch {}
+    }
+
+    $author = ""
+    try { $author = [string]$txtAuthor.Text } catch {}
+    return (Get-SteamWorkshopDescriptionText $author)
+}
+
+function Save-RimWorldModWorkshopDescription([string]$value) {
+    $path = Get-RimWorldModWorkshopDescriptionPath
+    [System.IO.File]::WriteAllText(
+        $path,
+        [string]$value,
+        (New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false))
+    )
+    return $path
+}
+
+function Reset-RimWorldModWorkshopDescription {
+    $path = Get-RimWorldModWorkshopDescriptionPath
+    if (Test-Path -LiteralPath $path) {
+        Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Show-RimWorldModWorkshopDescriptionEditor {
+    if ([string]::IsNullOrWhiteSpace([string]$script:OriginalPackageId)) {
+        [System.Windows.MessageBox]::Show(
+            $(if ($script:UiLanguage -eq "en") { "Load a RimWorld mod first." } else { "Najpierw załaduj mod RimWorld." }),
+            "Workshop description"
+        ) | Out-Null
+        return
+    }
+
+    [xml]$editorXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="RimWorld Mod - Workshop Description"
+        Width="900" Height="680"
+        MinWidth="700" MinHeight="500"
+        WindowStartupLocation="CenterOwner"
+        Background="#121018"
+        Foreground="#ECE8F6">
+  <Grid Margin="14">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+
+    <TextBlock Grid.Row="0"
+               Text="Opis Steam Workshop dla aktualnego moda tłumaczeniowego. Obsługuje BBCode Steam."
+               Margin="0,0,0,10"
+               Foreground="#B9AEC9"/>
+
+    <TextBox Name="txtDescription"
+             Grid.Row="1"
+             AcceptsReturn="True"
+             AcceptsTab="True"
+             TextWrapping="Wrap"
+             VerticalScrollBarVisibility="Auto"
+             HorizontalScrollBarVisibility="Auto"
+             FontFamily="Consolas"
+             FontSize="13"
+             Background="#1B1723"
+             Foreground="#ECE8F6"
+             BorderBrush="#4A3B5B"
+             Padding="10"/>
+
+    <Grid Grid.Row="2" Margin="0,12,0,0">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="Auto"/>
+      </Grid.ColumnDefinitions>
+
+      <StackPanel Grid.Column="0" Orientation="Horizontal">
+        <Button Name="btnDefault"
+                Content="Wczytaj domyślny"
+                Padding="14,7"
+                Margin="0,0,8,0"
+                Background="#2A2334"
+                Foreground="White"/>
+        <Button Name="btnDeleteSaved"
+                Content="Usuń zapisany custom"
+                Padding="14,7"
+                Background="#2A2334"
+                Foreground="White"/>
+      </StackPanel>
+
+      <StackPanel Grid.Column="1" Orientation="Horizontal">
+        <Button Name="btnCancel"
+                Content="Anuluj"
+                Padding="18,7"
+                Margin="0,0,8,0"
+                Background="#2A2334"
+                Foreground="White"/>
+        <Button Name="btnSave"
+                Content="Zapisz opis"
+                Padding="18,7"
+                Background="#7A3FC2"
+                Foreground="White"
+                FontWeight="SemiBold"/>
+      </StackPanel>
+    </Grid>
+  </Grid>
+</Window>
+'@
+
+    $reader = New-Object System.Xml.XmlNodeReader $editorXaml
+    $editor = [Windows.Markup.XamlReader]::Load($reader)
+    try { $editor.Owner = $window } catch {}
+
+    $txt = $editor.FindName("txtDescription")
+    $btnDefault = $editor.FindName("btnDefault")
+    $btnDeleteSaved = $editor.FindName("btnDeleteSaved")
+    $btnCancel = $editor.FindName("btnCancel")
+    $btnSave = $editor.FindName("btnSave")
+
+    $txt.Text = Get-RimWorldModWorkshopDescription
+
+    $btnDefault.Add_Click({
+        $author = ""
+        try { $author = [string]$txtAuthor.Text } catch {}
+        $txt.Text = Get-SteamWorkshopDescriptionText $author
+    })
+
+    $btnDeleteSaved.Add_Click({
+        Reset-RimWorldModWorkshopDescription
+        $author = ""
+        try { $author = [string]$txtAuthor.Text } catch {}
+        $txt.Text = Get-SteamWorkshopDescriptionText $author
+        Set-ControlTextSafe $txtStatus $(if ($script:UiLanguage -eq "en") {
+            "Saved custom Workshop description removed."
+        } else {
+            "Usunięto zapisany własny opis Workshop."
+        })
+    })
+
+    $btnCancel.Add_Click({
+        $editor.DialogResult = $false
+        $editor.Close()
+    })
+
+    $btnSave.Add_Click({
+        try {
+            [void](Save-RimWorldModWorkshopDescription ([string]$txt.Text))
+            Set-ControlTextSafe $txtStatus $(if ($script:UiLanguage -eq "en") {
+                "Custom Workshop description saved."
+            } else {
+                "Zapisano własny opis Workshop."
+            })
+            $editor.DialogResult = $true
+            $editor.Close()
+        } catch {
+            [System.Windows.MessageBox]::Show($_.Exception.Message,"Workshop description") | Out-Null
+        }
+    })
+
+    [void]$editor.ShowDialog()
+}
+
 function Get-SteamWorkshopDescriptionText([string]$translationAuthor) {
     $lang = Get-TargetLanguageInfo
     $originalLink = $script:OriginalWorkshopUrl
@@ -5330,18 +5872,158 @@ If you enjoy my mods and tools, you can support my work here:
 }
 
 function Build-SteamWorkshopDescription([string]$outMod, [string]$translationAuthor) {
-    $description = Get-SteamWorkshopDescriptionText $translationAuthor
+    $description = Get-RimWorldModWorkshopDescription
     $path = Join-Path $outMod "SteamWorkshopDescription.txt"
     [System.IO.File]::WriteAllText(
         $path,
-        $description,
+        [string]$description,
         (New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false))
     )
     return $path
 }
 
+
+function Get-RimWorldEntryIdentity($entry) {
+    if ($null -eq $entry) { return "" }
+
+    $kind = [string]$entry.Kind
+    $file = [string]$entry.File
+    $key = [string]$entry.Key
+
+    if ([string]::IsNullOrWhiteSpace($key)) { return "" }
+
+    # For DefInjected use the canonical target file. This prevents a row shown
+    # from a different source/version root from becoming a separate identity.
+    if ($kind -eq "DefInjected") {
+        $canonical = Get-TranslationOutputRelativeFile $entry
+        if (-not [string]::IsNullOrWhiteSpace($canonical)) {
+            $file = $canonical
+        }
+    }
+
+    return ("$kind|$file|$key").ToLowerInvariant()
+}
+
+function Reconcile-GridEntriesIntoScriptEntries {
+    $existing = @{}
+    foreach ($e in @($script:Entries)) {
+        $id = Get-RimWorldEntryIdentity $e
+        if (-not [string]::IsNullOrWhiteSpace($id) -and -not $existing.ContainsKey($id)) {
+            $existing[$id] = $e
+        }
+    }
+
+    # DataGrid.Items contains the rows the user actually sees/edits.
+    # Commit pending edits first so the last edited translation is not lost.
+    try {
+        [void]$grid.CommitEdit([System.Windows.Controls.DataGridEditingUnit]::Cell, $true)
+        [void]$grid.CommitEdit([System.Windows.Controls.DataGridEditingUnit]::Row, $true)
+    } catch {}
+
+    $added = 0
+    $updated = 0
+
+    foreach ($row in @($grid.Items)) {
+        if ($null -eq $row) { continue }
+        if ($row -eq [System.Windows.Data.CollectionView]::NewItemPlaceholder) { continue }
+
+        $id = Get-RimWorldEntryIdentity $row
+        if ([string]::IsNullOrWhiteSpace($id)) { continue }
+
+        if ($existing.ContainsKey($id)) {
+            $dst = $existing[$id]
+
+            # The grid is the authoritative editing surface.
+            if (-not [string]::IsNullOrWhiteSpace([string]$row.Translation)) {
+                $dst.Translation = [string]$row.Translation
+            }
+            if ([string]::IsNullOrWhiteSpace([string]$dst.Source) -and
+                -not [string]::IsNullOrWhiteSpace([string]$row.Source)) {
+                $dst.Source = [string]$row.Source
+            }
+
+            $updated++
+            continue
+        }
+
+        # A row can exist in the current grid even if it originated from a
+        # merged/versioned source and was lost from the canonical entry list.
+        $clone = [pscustomobject]@{
+            Kind = [string]$row.Kind
+            File = [string]$row.File
+            Key = [string]$row.Key
+            Source = [string]$row.Source
+            Translation = [string]$row.Translation
+            DefType = [string]$row.DefType
+            DefName = [string]$row.DefName
+            Field = [string]$row.Field
+        }
+
+        # Recover Def metadata from the key/path when the grid row came from an
+        # existing language file instead of directly from Defs.
+        if ([string]::IsNullOrWhiteSpace([string]$clone.DefName) -and
+            ([string]$clone.Key) -match '^(.+)\.([^.]+)$') {
+            $clone.DefName = [string]$Matches[1]
+            $clone.Field = [string]$Matches[2]
+        }
+        if ([string]::IsNullOrWhiteSpace([string]$clone.DefType) -and
+            ([string]$clone.File) -match '(?i)DefInjected[\\/]+([^\\/]+)') {
+            $clone.DefType = [string]$Matches[1]
+            $clone.Kind = "DefInjected"
+        }
+
+        [void]$script:Entries.Add($clone)
+        $existing[$id] = $clone
+        $added++
+    }
+
+    # Rebuild EntryKeys from the final canonical list so later scans/builds use
+    # the same identities as the reconciled entries.
+    $script:EntryKeys = @{}
+    foreach ($e in @($script:Entries)) {
+        $id = Get-RimWorldEntryIdentity $e
+        if (-not [string]::IsNullOrWhiteSpace($id)) {
+            $script:EntryKeys[$id] = $true
+        }
+    }
+
+    return [pscustomobject]@{
+        Added = $added
+        Updated = $updated
+        Total = $script:Entries.Count
+    }
+}
+
+function Get-BuildEntryDiagnostics([string[]]$keyPrefixes) {
+    $rows = New-Object System.Collections.ArrayList
+
+    foreach ($e in @($script:Entries)) {
+        foreach ($prefix in $keyPrefixes) {
+            if ([string]$e.Key -like "$prefix*") {
+                [void]$rows.Add([pscustomobject]@{
+                    Key = [string]$e.Key
+                    Kind = [string]$e.Kind
+                    File = [string]$e.File
+                    CanonicalFile = Get-TranslationOutputRelativeFile $e
+                    SourcePresent = -not [string]::IsNullOrWhiteSpace([string]$e.Source)
+                    TranslationPresent = -not [string]::IsNullOrWhiteSpace([string]$e.Translation)
+                    DefType = [string]$e.DefType
+                    DefName = [string]$e.DefName
+                    Field = [string]$e.Field
+                })
+                break
+            }
+        }
+    }
+
+    return @($rows)
+}
+
 function Build-TranslationMod([string]$parentFolder) {
     [void](Save-ToolkitTranslationCheckpoint "before-mod-build")
+
+    $reconcileReport = Reconcile-GridEntriesIntoScriptEntries
+    $buildDiag = @(Get-BuildEntryDiagnostics @("Tav_1x1Table","Tav_1x2Table"))
 
     $lang = Get-TargetLanguageInfo
     if ([string]::IsNullOrWhiteSpace($script:OriginalPackageId)) {
@@ -5370,7 +6052,7 @@ function Build-TranslationMod([string]$parentFolder) {
     }
 
     New-Item -ItemType Directory -Path (Join-Path $outMod "About") -Force | Out-Null
-    Write-LanguageFiles $outMod
+    $languageWriteReport = Write-LanguageFiles $outMod
 
     $author = $txtAuthor.Text.Trim()
     if ([string]::IsNullOrWhiteSpace($author)) { $author = "Community translation" }
@@ -5463,8 +6145,21 @@ Creator ID: $(Get-ToolkitCreatorId)
 Selected content version: $($script:SelectedContentVersion)
 Language roots: $((Get-LanguageRoots $script:OriginalModPath) -join "; ")`nKeyed entries: $keyed
 DefInjected entries: $defs
+Inherited Def fields generated: $($script:InheritedDefFieldCount)
 Translated entries: $translated
 Total unique entries: $($script:Entries.Count)
+Language XML files written: $($languageWriteReport.Files)
+Language XML entries written: $($languageWriteReport.Entries)
+Language XML missing after verification: $($languageWriteReport.Missing)
+Reconcile added entries: $($reconcileReport.Added)
+Reconcile updated entries: $($reconcileReport.Updated)
+Reconcile total entries: $($reconcileReport.Total)
+Inherited Tav_1x1Table / Tav_1x2Table diagnostics:
+$((@($script:InheritedDefDiagnostics | Where-Object { $_.Key -like "Tav_1x1Table*" -or $_.Key -like "Tav_1x2Table*" } | ForEach-Object { "  $($_.Key) | Parent=$($_.ParentName) | From=$($_.ResolvedFrom)" }) -join "`r`n"))
+Diagnostic Tav_1x1Table / Tav_1x2Table entries:
+$((@($buildDiag | ForEach-Object {
+    "  $($_.Key) | Kind=$($_.Kind) | File=$($_.File) | Canonical=$($_.CanonicalFile) | Source=$($_.SourcePresent) | Translation=$($_.TranslationPresent) | DefType=$($_.DefType) | Field=$($_.Field)"
+}) -join "`r`n"))
 Steam Workshop description: $steamDescriptionPath
 Source language: $((Get-SelectedSourceLanguageCode)) / $((Get-SelectedSourceRimWorldFolder))
 Target language: $((Get-SelectedTargetLanguageCode)) / $((Get-SelectedTargetRimWorldFolder))
@@ -5502,33 +6197,48 @@ function Get-MissingPlaceholders([string]$source, [string]$translation) {
 function Repair-TranslationPlaceholders([string]$source, [string]$translation) {
     if ([string]::IsNullOrWhiteSpace($translation)) { return $translation }
 
-    $missing = @(Get-MissingPlaceholders $source $translation)
-    if ($missing.Count -eq 0) { return $translation }
+    $sourceTokens = @(Get-Placeholders $source)
+    $result = [string]$translation
 
-    $result = $translation
-
-    foreach ($token in $missing) {
-        if ($token -match '^\{(\d+)(?::[^}]*)?\}$') {
-            $n = $Matches[1]
-
-            if ($result -match "(?<!\{)$n\}") {
-                $result = [regex]::Replace($result, "(?<!\{)$n\}", "{$n}", 1)
-                continue
-            }
-
-            if ($result -match "\{$n(?!\})") {
-                $result = [regex]::Replace($result, "\{$n(?!\})", "{$n}", 1)
-                continue
-            }
+    # Repair legacy internal tokens leaked by versions up to v0.10.0.
+    $legacy = @([regex]::Matches($result, '__MTTPH(\d+)__'))
+    foreach ($m in @($legacy | Sort-Object Index -Descending)) {
+        $index = [int]$m.Groups[1].Value
+        if ($index -ge 0 -and $index -lt $sourceTokens.Count) {
+            $result = $result.Remove($m.Index, $m.Length).Insert(
+                $m.Index,
+                [string]$sourceTokens[$index]
+            )
         }
+    }
 
-        if (-not $result.Contains($token)) {
-            $result = ($result.TrimEnd() + " " + $token).Trim()
+    # Repair new diagnostic tokens if a provider ever returns them unchanged.
+    $modern = @([regex]::Matches(
+        $result,
+        'ZXQ\s*MTTPH\s*0*(\d+)\s*QXZ',
+        [System.Text.RegularExpressions.RegexOptions]::IgnoreCase
+    ))
+    foreach ($m in @($modern | Sort-Object Index -Descending)) {
+        $index = [int]$m.Groups[1].Value
+        if ($index -ge 0 -and $index -lt $sourceTokens.Count) {
+            $result = $result.Remove($m.Index, $m.Length).Insert(
+                $m.Index,
+                [string]$sourceTokens[$index]
+            )
+        }
+    }
+
+    $missing = @(Get-MissingPlaceholders $source $result)
+    foreach ($token in $missing) {
+        # Literal \n is structural. Append it without converting it into a real line break.
+        if (-not $result.Contains([string]$token)) {
+            $result = ($result.TrimEnd() + " " + [string]$token).Trim()
         }
     }
 
     return $result
 }
+
 
 function Highlight-PlaceholderErrors($badEntries) {
     if ($null -eq $badEntries -or $badEntries.Count -eq 0) { return }
@@ -5620,16 +6330,25 @@ function Repair-PlaceholderErrorsAll($badEntries) {
 
 function Validate-Placeholders {
     $bad = New-Object System.Collections.ArrayList
+
     foreach ($e in $script:Entries) {
-        if ([string]::IsNullOrWhiteSpace($e.Translation)) { continue }
-        if (((Get-Placeholders $e.Source) -join '|') -ne ((Get-Placeholders $e.Translation) -join '|')) {
+        if ([string]::IsNullOrWhiteSpace([string]$e.Translation)) { continue }
+
+        # Recover old leaked internal tokens before validation.
+        $repaired = Repair-TranslationPlaceholders ([string]$e.Source) ([string]$e.Translation)
+        if ($repaired -cne [string]$e.Translation) {
+            $e.Translation = $repaired
+        }
+
+        if (-not (Test-TranslationPlaceholderIntegrity ([string]$e.Source) ([string]$e.Translation))) {
             [void]$bad.Add($e)
         }
     }
-    return $bad
+
+    return @($bad)
 }
 
-# ---------- Steam detection ----------
+
 function Get-SteamRoot {
     $candidates = @()
     try {
@@ -6503,7 +7222,7 @@ function Apply-CreatorProfileToTranslator {
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Mod Translation Toolkit v0.10.8"
+        Title="Mod Translation Toolkit v0.10.9"
         Height="840" Width="1260"
         WindowStartupLocation="CenterScreen"
         Background="#121018"
@@ -6662,7 +7381,7 @@ function Apply-CreatorProfileToTranslator {
         <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
           <Button Name="btnApiSettings" Content="API / Tłumaczenie" Margin="0,0,8,0"/>
           <Border Background="#2B2038" CornerRadius="5" Padding="10,5" VerticalAlignment="Center">
-            <TextBlock Text="v0.10.8" Foreground="#CDA8F2" FontWeight="SemiBold"/>
+            <TextBlock Text="v0.10.9" Foreground="#CDA8F2" FontWeight="SemiBold"/>
           </Border>
         </StackPanel>
       </Grid>
@@ -6751,6 +7470,8 @@ function Apply-CreatorProfileToTranslator {
                          Foreground="#B9AEC9" VerticalAlignment="Center"/>
             </StackPanel>
             <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="12,0,0,0">
+              <Button Name="btnBuildRimWorldGameTranslation" Content="Zbuduj mod tłumaczeniowy" Margin="0,0,8,0"/>
+              <Button Name="btnEditRimWorldGameWorkshopDescription" Content="Opis Workshop..." Margin="0,0,8,0"/>
               <Button Name="btnExportRimWorldGameCsv" Content="Eksport CSV" Margin="0,0,8,0"/>
               <Button Name="btnImportRimWorldGameCsv" Content="Import CSV"/>
             </StackPanel>
@@ -6832,6 +7553,7 @@ function Apply-CreatorProfileToTranslator {
             <Button Name="btnAssemblyDiagnostics" Content="Diagnostyka DLL/UI"/>
             <Button Name="btnBuild" Content="Zbuduj oddzielny mod"/>
             <Button Name="btnCopyWorkshop" Content="Kopiuj opis Workshop" IsEnabled="True"/>
+              <Button Name="btnEditModWorkshopDescription" Content="Opis Workshop..." Margin="8,0,0,0"/>
             <Label Name="lblCount" Content="Wpisy: 0" VerticalContentAlignment="Center"/>
           </WrapPanel>
 
@@ -7255,7 +7977,7 @@ $window = [Windows.Markup.XamlReader]::Load($reader)
 $names = @(
     "btnChooseMod","btnAnalyze","btnExport","btnImport","btnAutoTranslate","btnValidate","btnBuild",
     "txtModPath","txtModName","txtPackageId","txtAuthor","grid","lblCount","txtStatus",
-    "btnDetect","txtSearch","lblMods","modsGrid","btnUseSelected","btnOpenFolder","btnOpenCurrentFolder","cmbSourceLang","cmbTargetLang","lblSourceLang","lblTargetLang","tabTranslation","tabInstalledMods","tabGameProfiles","chkPreviewFlag","cmbPreviewFlag","btnCopyWorkshop","lblCoverageTitle","txtCoveragePL","txtCoverageEN","btnLoadExistingPL","btnLoadExistingEN","tabKenshi","btnDetectKenshi","btnChooseKenshi","txtKenshiPath","btnOpenKenshiFolder","btnScanKenshi","btnTranslateKenshi","btnExportKenshiCsv","btnImportKenshiCsv","btnFcsHelpKenshi","btnBuildKenshi","lblKenshiCount","kenshiGrid","txtKenshiStatus",
+    "btnDetect","txtSearch","lblMods","modsGrid","btnUseSelected","btnOpenFolder","btnOpenCurrentFolder","cmbSourceLang","cmbTargetLang","lblSourceLang","lblTargetLang","tabTranslation","tabInstalledMods","tabGameProfiles","chkPreviewFlag","cmbPreviewFlag","btnCopyWorkshop","btnEditModWorkshopDescription","lblCoverageTitle","txtCoveragePL","txtCoverageEN","btnLoadExistingPL","btnLoadExistingEN","tabKenshi","btnDetectKenshi","btnChooseKenshi","txtKenshiPath","btnOpenKenshiFolder","btnScanKenshi","btnTranslateKenshi","btnExportKenshiCsv","btnImportKenshiCsv","btnFcsHelpKenshi","btnBuildKenshi","lblKenshiCount","kenshiGrid","txtKenshiStatus",
   "btnUpdateExisting",
   "lblSearchTitle","txtSearchTerm","cmbSearchScope","btnClearSearch","lblReplaceTitle","txtReplaceTerm","btnReplaceAll","lblSearchCount",
   "tabWorkshop","txtCreatorName","txtSteamProfile","btnSaveCreatorProfile","txtWorkshopItemInput","btnAddWorkshopItem","btnRefreshWorkshop","btnRemoveWorkshopItem","btnOpenWorkshopItem","lblWorkshopItems","lblWorkshopSubscriptions","lblWorkshopFavorites","lblWorkshopViews","workshopGrid","txtWorkshopStatus",
@@ -7274,6 +7996,8 @@ $names = @(
   "btnRwGameCoreOnly",
   "btnRwGameDlcOnly",
   "btnScanRimWorldGame",
+  "btnBuildRimWorldGameTranslation",
+  "btnEditRimWorldGameWorkshopDescription",
   "btnExportRimWorldGameCsv",
   "btnImportRimWorldGameCsv",
   "rimWorldGameGrid",
@@ -7345,6 +8069,7 @@ foreach ($n in $names) { Set-Variable -Name $n -Value $window.FindName($n) }
 
 Load-WorkshopProfile
 Apply-CreatorProfileToTranslator
+Apply-CentralUiLanguage
 
 
 
@@ -8952,6 +9677,20 @@ $btnAutoTranslate.Add_Click({
 })
 
 
+
+$btnEditModWorkshopDescription.Add_Click({
+    try {
+        Show-RimWorldModWorkshopDescriptionEditor
+    } catch {
+        [System.Windows.MessageBox]::Show(
+            $_.Exception.Message,
+            "Workshop description",
+            [System.Windows.MessageBoxButton]::OK,
+            [System.Windows.MessageBoxImage]::Error
+        ) | Out-Null
+    }
+})
+
 $btnCopyWorkshop.Add_Click({
     try {
         $content = $null
@@ -9403,63 +10142,136 @@ function Get-RimWorldLanguageEntries([string]$langRoot, [string]$moduleName, [st
 }
 
 
+function Get-RimWorldGameInheritanceSummary {
+    if ($null -eq $script:RimWorldGameInheritedCounts -or
+        $script:RimWorldGameInheritedCounts.Count -eq 0) {
+        return ""
+    }
+
+    $parts = New-Object System.Collections.ArrayList
+    foreach ($name in @($script:RimWorldGameInheritedCounts.Keys | Sort-Object)) {
+        [void]$parts.Add("${name}: $($script:RimWorldGameInheritedCounts[$name])")
+    }
+
+    return (@($parts) -join ", ")
+}
+
 function Get-RimWorldGameDefSourceEntries([string]$modulePath, [string]$moduleName) {
     $rows = New-Object System.Collections.ArrayList
     $defsRoot = Join-Path $modulePath "Defs"
     if (-not (Test-Path -LiteralPath $defsRoot)) { return @() }
 
-    # Mirrors the currently supported DefInjected fields used by the mod workflow.
-    # These are the common user-facing fields present across Core and DLC Defs.
     $fields = @(
         "label","description","jobString","reportString","gerund",
         "labelShort","labelNoun","labelPlural","labelMale","labelFemale",
         "inspectString","baseDesc","letterLabel","letterText"
     )
 
-    $seen = @{}
+    # Two-pass scan, matching the RimWorld Mod workflow:
+    # 1. collect concrete + abstract/template Defs
+    # 2. resolve localizable fields recursively through ParentName
+    $records = New-Object System.Collections.ArrayList
+    $parentIndex = @{}
 
     foreach ($f in Get-ChildItem -LiteralPath $defsRoot -Recurse -Filter *.xml -File -ErrorAction SilentlyContinue) {
         try {
             [xml]$doc = Get-Content -LiteralPath $f.FullName -Raw -Encoding UTF8
             if ($null -eq $doc.DocumentElement -or $doc.DocumentElement.Name -ne "Defs") { continue }
 
-            foreach ($def in $doc.DocumentElement.ChildNodes) {
+            foreach ($def in @($doc.DocumentElement.ChildNodes)) {
                 if ($def.NodeType -ne [System.Xml.XmlNodeType]::Element) { continue }
 
-                $defNameNode = $def.SelectSingleNode("defName")
-                if ($null -eq $defNameNode -or [string]::IsNullOrWhiteSpace([string]$defNameNode.InnerText)) {
-                    continue
+                $defType = [string]$def.Name
+
+                $defName = ""
+                $defNameNode = Get-DirectDefFieldNode $def "defName"
+                if ($null -ne $defNameNode -and
+                    -not [string]::IsNullOrWhiteSpace([string]$defNameNode.InnerText)) {
+                    $defName = ([string]$defNameNode.InnerText).Trim()
                 }
 
-                $defType = [string]$def.Name
-                $defName = ([string]$defNameNode.InnerText).Trim()
-
-                foreach ($field in $fields) {
-                    $node = $def.SelectSingleNode($field)
-                    if ($null -eq $node -or [string]::IsNullOrWhiteSpace([string]$node.InnerText)) {
-                        continue
+                $templateName = ""
+                try {
+                    if ($null -ne $def.Attributes["Name"]) {
+                        $templateName = [string]$def.Attributes["Name"].Value
                     }
+                } catch {}
 
-                    $key = "$defName.$field"
-                    $id = "$moduleName|DefInjected/$defType|$key".ToLowerInvariant()
-                    if ($seen.ContainsKey($id)) { continue }
-                    $seen[$id] = $true
+                $parentName = ""
+                try {
+                    if ($null -ne $def.Attributes["ParentName"]) {
+                        $parentName = [string]$def.Attributes["ParentName"].Value
+                    }
+                } catch {}
 
-                    [void]$rows.Add([pscustomobject]@{
-                        Module = $moduleName
-                        Type = "DefInjected/$defType"
-                        File = $f.FullName
-                        Key = $key
-                        Source = ([string]$node.InnerText).TrimEnd()
-                        Translation = ""
-                    })
+                $record = [pscustomobject]@{
+                    DefType = $defType
+                    DefName = $defName
+                    TemplateName = $templateName
+                    ParentName = $parentName
+                    Node = $def
+                    File = [string]$f.FullName
+                }
+                [void]$records.Add($record)
+
+                if (-not [string]::IsNullOrWhiteSpace($templateName)) {
+                    $key = "$defType|$templateName".ToLowerInvariant()
+                    if (-not $parentIndex.ContainsKey($key)) {
+                        $parentIndex[$key] = $record
+                    }
                 }
             }
         } catch {}
     }
 
+    $seen = @{}
+    $inheritedCount = 0
+
+    foreach ($record in @($records)) {
+        if ([string]::IsNullOrWhiteSpace([string]$record.DefName)) { continue }
+
+        $defType = [string]$record.DefType
+        $defName = [string]$record.DefName
+
+        foreach ($field in $fields) {
+            $visited = New-Object 'System.Collections.Generic.HashSet[string]'
+            $resolved = Resolve-InheritedDefField $record $field $parentIndex $visited
+
+            if ($null -eq $resolved -or $null -eq $resolved.Node) { continue }
+
+            $value = [string]$resolved.Node.InnerText
+            if ([string]::IsNullOrWhiteSpace($value)) { continue }
+
+            $key = "$defName.$field"
+            $id = "$moduleName|DefInjected/$defType|$key".ToLowerInvariant()
+            if ($seen.ContainsKey($id)) { continue }
+            $seen[$id] = $true
+
+            [void]$rows.Add([pscustomobject]@{
+                Module = $moduleName
+                Type = "DefInjected/$defType"
+                File = [string]$record.File
+                Key = $key
+                Source = $value.TrimEnd()
+                Translation = ""
+                Inherited = [bool]$resolved.Inherited
+                InheritedFrom = [string]$resolved.From
+            })
+
+            if ($resolved.Inherited) { $inheritedCount++ }
+        }
+    }
+
+    try {
+        if ($null -eq $script:RimWorldGameInheritedCounts) {
+            $script:RimWorldGameInheritedCounts = @{}
+        }
+        $script:RimWorldGameInheritedCounts[$moduleName] = $inheritedCount
+    } catch {}
+
     return @($rows)
 }
+
 
 function Merge-RimWorldGameSourceEntries($primary, $secondary) {
     $result = New-Object System.Collections.ArrayList
@@ -9481,6 +10293,533 @@ function Get-RimWorldEntryIdentity($entry) {
     return "$($entry.Module)|$($entry.Type)|$($entry.Key)"
 }
 
+
+
+function Commit-RimWorldGameGridEdits {
+    try {
+        [void]$rimWorldGameGrid.CommitEdit([System.Windows.Controls.DataGridEditingUnit]::Cell, $true)
+        [void]$rimWorldGameGrid.CommitEdit([System.Windows.Controls.DataGridEditingUnit]::Row, $true)
+    } catch {}
+}
+
+function Get-RimWorldGameVersion([string]$gamePath) {
+    $candidates = @(
+        (Join-Path $gamePath "Version.txt"),
+        (Join-Path $gamePath "version.txt")
+    )
+
+    foreach ($p in $candidates) {
+        if (-not (Test-Path -LiteralPath $p)) { continue }
+        try {
+            $raw = Get-Content -LiteralPath $p -Raw -Encoding UTF8
+            if ($raw -match '([0-9]+\.[0-9]+)') {
+                return [string]$Matches[1]
+            }
+        } catch {}
+    }
+
+    # Current supported fallback for this Toolkit line.
+    return "1.6"
+}
+
+function Get-RimWorldOfficialPackageId([string]$moduleName) {
+    switch -Regex ($moduleName) {
+        '^Core$'     { return "ludeon.rimworld" }
+        '^Royalty$'  { return "ludeon.rimworld.royalty" }
+        '^Ideology$' { return "ludeon.rimworld.ideology" }
+        '^Biotech$'  { return "ludeon.rimworld.biotech" }
+        '^Anomaly$'  { return "ludeon.rimworld.anomaly" }
+        '^Odyssey$'  { return "ludeon.rimworld.odyssey" }
+        default      { return "" }
+    }
+}
+
+function Get-RimWorldGameTargetFolder {
+    $lang = Get-RimWorldGameSelectedTargetLanguage
+    if ($null -eq $lang) { return "Polish" }
+
+    if (-not [string]::IsNullOrWhiteSpace([string]$lang.RimWorldFolder)) {
+        return [string]$lang.RimWorldFolder
+    }
+
+    return [string]$lang.NativeName
+}
+
+function Get-RimWorldGameBuildEntries {
+    Commit-RimWorldGameGridEdits
+
+    # Always use the full scanned set, not the currently filtered view.
+    $all = @($script:RimWorldGameEntries)
+    if ($all.Count -eq 0) {
+        throw $(if ($script:UiLanguage -eq "en") {
+            "There are no RimWorld Game entries. Scan Core/DLC first."
+        } else {
+            "Brak wpisów RimWorld Game. Najpierw zeskanuj Core/DLC."
+        })
+    }
+
+    $translated = @($all | Where-Object {
+        -not [string]::IsNullOrWhiteSpace([string]$_.Translation)
+    })
+
+    if ($translated.Count -eq 0) {
+        throw $(if ($script:UiLanguage -eq "en") {
+            "There are no translated entries to build."
+        } else {
+            "Brak przetłumaczonych wpisów do zbudowania moda."
+        })
+    }
+
+    return @($translated)
+}
+
+function Get-RimWorldGameBuildKey($entry) {
+    return "$([string]$entry.Type)|$([string]$entry.Key)".ToLowerInvariant()
+}
+
+function Test-RimWorldGameBuildConflicts($entries) {
+    $map = @{}
+    $conflicts = New-Object System.Collections.ArrayList
+
+    foreach ($e in @($entries)) {
+        $id = Get-RimWorldGameBuildKey $e
+        if (-not $map.ContainsKey($id)) {
+            $map[$id] = $e
+            continue
+        }
+
+        $first = $map[$id]
+        $a = ([string]$first.Translation).Trim()
+        $b = ([string]$e.Translation).Trim()
+
+        if ($a -cne $b) {
+            [void]$conflicts.Add([pscustomobject]@{
+                Type = [string]$e.Type
+                Key = [string]$e.Key
+                ModuleA = [string]$first.Module
+                ModuleB = [string]$e.Module
+                TranslationA = $a
+                TranslationB = $b
+            })
+        }
+    }
+
+    return @($conflicts)
+}
+
+function New-RimWorldGameTranslationPreview([string]$outMod, [string]$targetCode) {
+    Add-Type -AssemblyName System.Drawing -ErrorAction SilentlyContinue
+
+    $aboutDir = Join-Path $outMod "About"
+    New-Item -ItemType Directory -Path $aboutDir -Force | Out-Null
+    $dest = Join-Path $aboutDir "Preview.png"
+
+    $bmp = New-Object System.Drawing.Bitmap 640,360
+    $g = [System.Drawing.Graphics]::FromImage($bmp)
+
+    try {
+        $g.Clear([System.Drawing.Color]::FromArgb(18,16,24))
+
+        $panel = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(34,28,44))
+        $g.FillRectangle($panel, 30, 30, 580, 300)
+        $panel.Dispose()
+
+        $accent = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(122,63,194))
+        $g.FillRectangle($accent, 30, 30, 580, 12)
+        $accent.Dispose()
+
+        $font1 = New-Object System.Drawing.Font("Segoe UI",30,[System.Drawing.FontStyle]::Bold)
+        $font2 = New-Object System.Drawing.Font("Segoe UI",19,[System.Drawing.FontStyle]::Regular)
+        $white = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::White)
+        $soft = New-Object System.Drawing.SolidBrush ([System.Drawing.Color]::FromArgb(190,180,210))
+
+        $g.DrawString("RimWorld", $font1, $white, 62, 85)
+        $g.DrawString("Game Translation", $font2, $soft, 65, 145)
+
+        $flagCode = "PL"
+        $lang = Get-RimWorldGameSelectedTargetLanguage
+        if ($null -ne $lang -and -not [string]::IsNullOrWhiteSpace([string]$lang.Flag)) {
+            $flagCode = [string]$lang.Flag
+        }
+
+        Draw-FlagOverlay $g $flagCode 390 205 170 95
+
+        $font1.Dispose()
+        $font2.Dispose()
+        $white.Dispose()
+        $soft.Dispose()
+    } finally {
+        $g.Dispose()
+    }
+
+    try {
+        $bmp.Save($dest, [System.Drawing.Imaging.ImageFormat]::Png)
+    } finally {
+        $bmp.Dispose()
+    }
+
+    return $dest
+}
+
+
+function Get-RimWorldGameWorkshopDescriptionPath {
+    return (Join-Path (Get-ToolkitSettingsDirectory) "rimworld-game-workshop-description.txt")
+}
+
+function Get-DefaultRimWorldGameWorkshopDescription {
+    $targetLang = Get-RimWorldGameSelectedTargetLanguage
+    $displayLanguage = if ($null -ne $targetLang) { [string]$targetLang.Name } else { "Polish" }
+    if ([string]::IsNullOrWhiteSpace($displayLanguage) -and $null -ne $targetLang) {
+        $displayLanguage = [string]$targetLang.NativeName
+    }
+    if ([string]::IsNullOrWhiteSpace($displayLanguage)) { $displayLanguage = "Translation" }
+
+    $modules = @($lstRimWorldGameModules.SelectedItems | ForEach-Object { [string]$_.Content })
+    if ($modules.Count -eq 0) {
+        $modules = @($script:RimWorldGameEntries | ForEach-Object { [string]$_.Module } | Sort-Object -Unique)
+    }
+
+    $moduleLines = if ($modules.Count -gt 0) {
+        (@($modules | ForEach-Object { "[*]$_" }) -join "`r`n")
+    } else {
+        "[*]Core / selected DLC"
+    }
+
+    $creator = Get-ToolkitCreatorId
+    $toolUrl = "https://github.com/DrizztGaming/Mod-Translation-Toolkit"
+    $kofiUrl = "https://ko-fi.com/drizztgaming"
+
+    return @"
+[h1]RimWorld - $displayLanguage Translation[/h1]
+
+$displayLanguage translation package for RimWorld Core and selected DLC.
+
+[h1]Included modules[/h1]
+[list]
+$moduleLines
+[/list]
+
+[h1]Translation Info[/h1]
+[list]
+[*]Language: $displayLanguage
+[*]Creator ID: $creator
+[/list]
+
+[h1]Mod Translation Toolkit[/h1]
+Created with [url=$toolUrl][b]Mod Translation Toolkit[/b][/url].
+
+[url=$toolUrl]GitHub - Mod Translation Toolkit[/url]
+
+[h1]Support[/h1]
+[url=$kofiUrl][b]Support me on Ko-fi[/b][/url]
+"@
+}
+
+function Get-RimWorldGameWorkshopDescription {
+    $path = Get-RimWorldGameWorkshopDescriptionPath
+    if (Test-Path -LiteralPath $path) {
+        try {
+            $saved = Get-Content -LiteralPath $path -Raw -Encoding UTF8
+            if (-not [string]::IsNullOrWhiteSpace($saved)) {
+                return [string]$saved
+            }
+        } catch {}
+    }
+
+    return (Get-DefaultRimWorldGameWorkshopDescription)
+}
+
+function Save-RimWorldGameWorkshopDescription([string]$value) {
+    $path = Get-RimWorldGameWorkshopDescriptionPath
+    [System.IO.File]::WriteAllText(
+        $path,
+        [string]$value,
+        (New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false))
+    )
+    return $path
+}
+
+function Reset-RimWorldGameWorkshopDescription {
+    $path = Get-RimWorldGameWorkshopDescriptionPath
+    if (Test-Path -LiteralPath $path) {
+        Remove-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+    }
+}
+
+function Show-RimWorldGameWorkshopDescriptionEditor {
+    [xml]$editorXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="RimWorld Game - Workshop Description"
+        Width="900" Height="680"
+        MinWidth="700" MinHeight="500"
+        WindowStartupLocation="CenterOwner"
+        Background="#121018"
+        Foreground="#ECE8F6">
+  <Grid Margin="14">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+
+    <TextBlock Grid.Row="0"
+               Text="Opis Steam Workshop używany przy budowaniu moda. Obsługuje BBCode Steam."
+               Margin="0,0,0,10"
+               Foreground="#B9AEC9"/>
+
+    <TextBox Name="txtDescription"
+             Grid.Row="1"
+             AcceptsReturn="True"
+             AcceptsTab="True"
+             TextWrapping="Wrap"
+             VerticalScrollBarVisibility="Auto"
+             HorizontalScrollBarVisibility="Auto"
+             FontFamily="Consolas"
+             FontSize="13"
+             Background="#1B1723"
+             Foreground="#ECE8F6"
+             BorderBrush="#4A3B5B"
+             Padding="10"/>
+
+    <Grid Grid.Row="2" Margin="0,12,0,0">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="Auto"/>
+      </Grid.ColumnDefinitions>
+
+      <StackPanel Grid.Column="0" Orientation="Horizontal">
+        <Button Name="btnDefault"
+                Content="Wczytaj domyślny"
+                Padding="14,7"
+                Margin="0,0,8,0"
+                Background="#2A2334"
+                Foreground="White"/>
+        <Button Name="btnDeleteSaved"
+                Content="Usuń zapisany custom"
+                Padding="14,7"
+                Background="#2A2334"
+                Foreground="White"/>
+      </StackPanel>
+
+      <StackPanel Grid.Column="1" Orientation="Horizontal">
+        <Button Name="btnCancel"
+                Content="Anuluj"
+                Padding="18,7"
+                Margin="0,0,8,0"
+                Background="#2A2334"
+                Foreground="White"/>
+        <Button Name="btnSave"
+                Content="Zapisz opis"
+                Padding="18,7"
+                Background="#7A3FC2"
+                Foreground="White"
+                FontWeight="SemiBold"/>
+      </StackPanel>
+    </Grid>
+  </Grid>
+</Window>
+'@
+
+    $reader = New-Object System.Xml.XmlNodeReader $editorXaml
+    $editor = [Windows.Markup.XamlReader]::Load($reader)
+    try { $editor.Owner = $window } catch {}
+
+    $txt = $editor.FindName("txtDescription")
+    $btnDefault = $editor.FindName("btnDefault")
+    $btnDeleteSaved = $editor.FindName("btnDeleteSaved")
+    $btnCancel = $editor.FindName("btnCancel")
+    $btnSave = $editor.FindName("btnSave")
+
+    $txt.Text = Get-RimWorldGameWorkshopDescription
+
+    $btnDefault.Add_Click({
+        $txt.Text = Get-DefaultRimWorldGameWorkshopDescription
+    })
+
+    $btnDeleteSaved.Add_Click({
+        Reset-RimWorldGameWorkshopDescription
+        $txt.Text = Get-DefaultRimWorldGameWorkshopDescription
+        Set-ControlTextSafe $txtRimWorldGameStatus $(if ($script:UiLanguage -eq "en") {
+            "Saved custom Workshop description removed."
+        } else {
+            "Usunięto zapisany własny opis Workshop."
+        })
+    })
+
+    $btnCancel.Add_Click({
+        $editor.DialogResult = $false
+        $editor.Close()
+    })
+
+    $btnSave.Add_Click({
+        try {
+            [void](Save-RimWorldGameWorkshopDescription ([string]$txt.Text))
+            Set-ControlTextSafe $txtRimWorldGameStatus $(if ($script:UiLanguage -eq "en") {
+                "Custom Workshop description saved."
+            } else {
+                "Zapisano własny opis Workshop."
+            })
+            $editor.DialogResult = $true
+            $editor.Close()
+        } catch {
+            [System.Windows.MessageBox]::Show($_.Exception.Message,"Workshop description") | Out-Null
+        }
+    })
+
+    [void]$editor.ShowDialog()
+}
+
+function Build-RimWorldGameTranslationMod([string]$parentFolder) {
+    $entries = @(Get-RimWorldGameBuildEntries)
+    $conflicts = @(Test-RimWorldGameBuildConflicts $entries)
+
+    if ($conflicts.Count -gt 0) {
+        $lines = @($conflicts | Select-Object -First 15 | ForEach-Object {
+            "$($_.Type) / $($_.Key) :: $($_.ModuleA) <> $($_.ModuleB)"
+        })
+        throw $(if ($script:UiLanguage -eq "en") {
+            "Conflicting Core/DLC translation keys were found: $($conflicts.Count).`r`n`r`n$($lines -join "`r`n")"
+        } else {
+            "Wykryto konflikty kluczy tłumaczenia Core/DLC: $($conflicts.Count).`r`n`r`n$($lines -join "`r`n")"
+        })
+    }
+
+    $targetLang = Get-RimWorldGameSelectedTargetLanguage
+    if ($null -eq $targetLang) { throw "Target language is not selected." }
+
+    $targetCode = [string]$targetLang.Code
+    $targetFolder = Get-RimWorldGameTargetFolder
+    $creator = Get-ToolkitCreatorId
+
+    $displayLanguage = [string]$targetLang.Name
+    if ([string]::IsNullOrWhiteSpace($displayLanguage)) { $displayLanguage = [string]$targetLang.NativeName }
+
+    $displayName = "RimWorld - $displayLanguage Translation"
+    $safeName = ($displayName -replace '[\\/:*?"<>|]', '_')
+    $outMod = Join-Path $parentFolder $safeName
+
+    if (Test-Path -LiteralPath $outMod) {
+        Remove-Item -LiteralPath $outMod -Recurse -Force
+    }
+
+    $aboutDir = Join-Path $outMod "About"
+    $langRoot = Join-Path $outMod "Languages\$targetFolder"
+    New-Item -ItemType Directory -Path $aboutDir -Force | Out-Null
+    New-Item -ItemType Directory -Path $langRoot -Force | Out-Null
+
+    # Deduplicate equal keys across modules. Different translations were already
+    # rejected above, so keeping the first identical row is safe.
+    $unique = @{}
+    foreach ($e in $entries) {
+        $id = Get-RimWorldGameBuildKey $e
+        if (-not $unique.ContainsKey($id)) { $unique[$id] = $e }
+    }
+
+    $keyed = @($unique.Values | Where-Object { $_.Type -eq "Keyed" } | Sort-Object Key)
+    if ($keyed.Count -gt 0) {
+        $dest = Join-Path $langRoot "Keyed\RimWorldGame.xml"
+        New-Item -ItemType Directory -Path (Split-Path $dest -Parent) -Force | Out-Null
+
+        $sb = New-Object System.Text.StringBuilder
+        [void]$sb.AppendLine('<?xml version="1.0" encoding="utf-8"?>')
+        [void]$sb.AppendLine('<LanguageData>')
+        foreach ($e in $keyed) {
+            [void]$sb.AppendLine("  <$($e.Key)>$(XmlEscape ([string]$e.Translation).TrimEnd())</$($e.Key)>")
+        }
+        [void]$sb.AppendLine('</LanguageData>')
+        [System.IO.File]::WriteAllText($dest,$sb.ToString(),(New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false)))
+    }
+
+    $defRows = @($unique.Values | Where-Object { $_.Type -like "DefInjected/*" })
+    foreach ($typeGroup in @($defRows | Group-Object Type)) {
+        $defType = ([string]$typeGroup.Name -replace '^DefInjected/','')
+        if ([string]::IsNullOrWhiteSpace($defType)) { continue }
+
+        $dest = Join-Path $langRoot "DefInjected\$defType\$defType.xml"
+        New-Item -ItemType Directory -Path (Split-Path $dest -Parent) -Force | Out-Null
+
+        $sb = New-Object System.Text.StringBuilder
+        [void]$sb.AppendLine('<?xml version="1.0" encoding="utf-8"?>')
+        [void]$sb.AppendLine('<LanguageData>')
+        foreach ($e in @($typeGroup.Group | Sort-Object Key)) {
+            [void]$sb.AppendLine("  <$($e.Key)>$(XmlEscape ([string]$e.Translation).TrimEnd())</$($e.Key)>")
+        }
+        [void]$sb.AppendLine('</LanguageData>')
+        [System.IO.File]::WriteAllText($dest,$sb.ToString(),(New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false)))
+    }
+
+    $selectedModules = @($lstRimWorldGameModules.SelectedItems | ForEach-Object { [string]$_.Content })
+    if ($selectedModules.Count -eq 0) {
+        $selectedModules = @($entries | ForEach-Object { [string]$_.Module } | Sort-Object -Unique)
+    }
+
+    $dependencyXml = ""
+    $loadAfterXml = ""
+    foreach ($module in $selectedModules) {
+        $pid = Get-RimWorldOfficialPackageId $module
+        if ([string]::IsNullOrWhiteSpace($pid)) { continue }
+
+        # Core is always present, so it only needs loadAfter.
+        if ($module -ine "Core") {
+            $dependencyXml += "    <li>`r`n      <packageId>$pid</packageId>`r`n      <displayName>$module</displayName>`r`n    </li>`r`n"
+        }
+        $loadAfterXml += "    <li>$pid</li>`r`n"
+    }
+
+    $version = Get-RimWorldGameVersion ([string]$txtRimWorldGamePath.Text)
+    $packageId = ("mtt.rimworld.game.$creator.$targetCode" -replace '[^a-zA-Z0-9_.-]','').ToLowerInvariant()
+
+    $about = @"
+<?xml version="1.0" encoding="utf-8"?>
+<ModMetaData>
+  <name>$([System.Security.SecurityElement]::Escape($displayName))</name>
+  <author>$([System.Security.SecurityElement]::Escape([string]$txtAuthor.Text))</author>
+  <packageId>$packageId</packageId>
+  <modVersion>0.10.9</modVersion>
+  <supportedVersions>
+    <li>$version</li>
+  </supportedVersions>
+  <description>$([System.Security.SecurityElement]::Escape($displayLanguage)) translation package for RimWorld Core and selected DLC.
+
+Generated with Mod Translation Toolkit.
+https://github.com/DrizztGaming/Mod-Translation-Toolkit</description>
+  <modDependencies>
+$dependencyXml  </modDependencies>
+  <loadAfter>
+$loadAfterXml  </loadAfter>
+</ModMetaData>
+"@
+    [System.IO.File]::WriteAllText((Join-Path $aboutDir "About.xml"),$about,(New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false)))
+
+    [void](New-RimWorldGameTranslationPreview $outMod $targetCode)
+
+    $moduleText = $selectedModules -join ", "
+    $report = @"
+Mod Translation Toolkit v$AppVersion
+Build type: RimWorld Game translation mod
+Target language: $targetCode / $targetFolder
+Selected modules: $moduleText
+PackageId: $packageId
+Supported RimWorld version: $version
+Scanned entries: $($script:RimWorldGameEntries.Count)
+Translated entries written: $($unique.Count)
+Keyed entries written: $($keyed.Count)
+DefInjected entries written: $($defRows.Count)
+Conflicts: 0
+Output: $outMod
+"@
+    [System.IO.File]::WriteAllText((Join-Path $outMod "TranslationBuildReport.txt"),$report,(New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false)))
+
+    $workshop = Get-RimWorldGameWorkshopDescription
+    [System.IO.File]::WriteAllText(
+        (Join-Path $outMod "SteamWorkshopDescription.txt"),
+        [string]$workshop,
+        (New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false))
+    )
+
+    return $outMod
+}
 
 function Export-RimWorldGameCsv([string]$path) {
     $rows = @($rimWorldGameGrid.ItemsSource)
@@ -9824,6 +11163,61 @@ $btnScanRimWorldGame.Add_Click({
         ) | Out-Null
     } finally {
         $btnScanRimWorldGame.IsEnabled = $true
+    }
+})
+
+
+
+$btnEditRimWorldGameWorkshopDescription.Add_Click({
+    try {
+        Show-RimWorldGameWorkshopDescriptionEditor
+    } catch {
+        [System.Windows.MessageBox]::Show(
+            $_.Exception.Message,
+            "Workshop description",
+            [System.Windows.MessageBoxButton]::OK,
+            [System.Windows.MessageBoxImage]::Error
+        ) | Out-Null
+    }
+})
+
+$btnBuildRimWorldGameTranslation.Add_Click({
+    try {
+        Commit-RimWorldGameGridEdits
+
+        $defaultParent = ""
+        try {
+            $gamePath = [string]$txtRimWorldGamePath.Text
+            if (-not [string]::IsNullOrWhiteSpace($gamePath)) {
+                $candidate = Join-Path $gamePath "Mods"
+                if (Test-Path -LiteralPath $candidate) { $defaultParent = $candidate }
+            }
+        } catch {}
+
+        $picked = Show-ModernFolderPicker `
+            $(if ($script:UiLanguage -eq "en") { "Choose the folder where the translation mod should be created" } else { "Wybierz folder, w którym utworzyć mod tłumaczeniowy" }) `
+            $defaultParent
+
+        if ([string]::IsNullOrWhiteSpace($picked)) { return }
+
+        $out = Build-RimWorldGameTranslationMod $picked
+        $msg = if ($script:UiLanguage -eq "en") {
+            "RimWorld Game translation mod created:`n`n$out"
+        } else {
+            "Utworzono mod tłumaczeniowy RimWorld Game:`n`n$out"
+        }
+        Set-ControlTextSafe $txtRimWorldGameStatus $msg
+        [System.Windows.MessageBox]::Show($msg,"RimWorld Game") | Out-Null
+
+        try { Start-Process explorer.exe -ArgumentList @($out) } catch {}
+    } catch {
+        $msg = if ($script:UiLanguage -eq "en") {
+            "Could not build the RimWorld Game translation mod.`n`n$($_.Exception.Message)"
+        } else {
+            "Nie udało się zbudować moda tłumaczeniowego RimWorld Game.`n`n$($_.Exception.Message)"
+        }
+        Set-ControlTextSafe $txtRimWorldGameStatus $msg
+        [System.Windows.MessageBox]::Show($msg,"RimWorld Game",[System.Windows.MessageBoxButton]::OK,[System.Windows.MessageBoxImage]::Error) | Out-Null
     }
 })
 

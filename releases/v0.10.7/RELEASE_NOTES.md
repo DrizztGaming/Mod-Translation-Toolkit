@@ -1,9 +1,9 @@
 # Mod Translation Toolkit v0.10.7 Experimental
 
-## Startup order hotfix
+## Windows PowerShell 5.1 startup hotfix
 
-`Apply-CentralUiLanguage` was called before its function definition had been executed.
+Fixes the startup parser error:
 
-PowerShell processes script files top-to-bottom, so the early call failed even though the function existed later in the file.
+`Variable reference is not valid. ':' was not followed by a valid variable name character.`
 
-v0.10.7 removes that premature call. UI language initialization still runs through the later `Apply-UiLanguage` path.
+The affected interpolation now uses `${name}` syntax and is compatible with Windows PowerShell 5.1.
