@@ -1,5 +1,70 @@
 # Changelog
 
+## 0.10.15 Experimental - 2026-08-07
+
+### Quiet glossary learning
+- Learning mode now defaults to **Silent** instead of showing a popup after every manual correction.
+- Added three persistent modes: **Silent / Ask / Off**.
+- Clicking the learning-mode button cycles between the modes.
+- Silent mode queues manual corrections without interrupting translation work.
+- Added **Suggestions: N / Propozycje: N** buttons to RimWorld Game and RimWorld Mod.
+- Added a batch review window for queued suggestions.
+- Review actions: accept selected, accept all, reject selected, reject all.
+- Repeated identical corrections are merged and counted.
+- Accepting a suggestion transfers its occurrence count into glossary confidence.
+- Confidence 3+ activates the learned contextual rule automatically.
+- Core/DLC and mod suggestions remain context-aware by Module, DefType, Field and PackageId.
+- Ask mode preserves the previous immediate confirmation workflow.
+- Off mode disables learning while leaving the glossary itself active.
+
+## 0.10.14 Experimental - 2026-08-06
+
+- Rebuilt the startup hotfix from clean v0.10.12.
+- Fixed only the two invalid `$score:` interpolations using `${score}:`.
+- Removed the over-broad v0.10.13 replacement that corrupted valid `$script:` scoped variables.
+- Preserves smarter translation detection, glossary and learning features.
+
+## 0.10.12 Experimental - 2026-08-06
+
+### Smarter existing RimWorld translation detection
+- Existing translation mods no longer need `Translation`, `Tłumaczenie` or similar wording in `About.xml` name.
+- Added weighted structural classification using multiple independent signals.
+- Signals include actual language payload, translation-only content shape, Toolkit metadata/attribution, translation-like packageId/name/description, packageId-derived original, `modDependencies`, and `loadAfter`.
+- Dependencies and loadAfter only count when they resolve to an installed non-framework mod.
+- A real language payload is mandatory, reducing false positives from normal compatibility/patch mods.
+- Custom-named language-only mods with an explicit dependency on their original mod are now recognized automatically.
+- Classification score/signals are shown in the status text when an existing translation is opened.
+- Source-mod resolution still uses packageId, normalized name, dependencies and loadAfter/loadBefore after classification.
+
+## 0.10.11 Experimental - 2026-08-06
+
+### Learning glossary / translation memory
+- RimWorld Game and RimWorld Mod now remember the result of automatic translation as a learning baseline.
+- When the user manually changes that automatic result, Toolkit can propose saving the correction to the contextual glossary.
+- Learned rules are scoped to the current context: Game/Mod, Module/DLC, DefType, Field and mod PackageId.
+- Learned rules start with confidence 1 and remain inactive.
+- Repeating the same correction raises confidence automatically.
+- At confidence 3 the learned rule activates automatically.
+- This avoids turning one accidental edit into a global rule.
+- The glossary editor now shows **Confidence** and whether a rule was **Learned**.
+- Manual glossary rules still work immediately as before.
+- Learning uses complete source entries, not guessed fragments from long sentences. This is especially reliable for labels such as `Counter -> lada`.
+
+## 0.10.10 Experimental - 2026-08-06
+
+### RimWorld contextual glossary
+- Added a shared contextual glossary for **RimWorld Game (Core/DLC)** and **RimWorld Mod**.
+- Rules support: Source, Target, Scope (All/Game/Mod), Module/DLC, DefType, Field and PackageId.
+- Glossary terms are protected before Google/DeepL/LibreTranslate and restored as the chosen target term after translation.
+- Whole-word matching prevents terms such as `counter` from affecting words such as `counterattack`.
+- Exact full-entry glossary matches bypass the translation provider entirely.
+- Added a conservative default example: `counter -> lada` only for `ThingDef.label`.
+- Added **Glosariusz...** editor to both RimWorld Game and RimWorld Mod.
+- Added **Tłumacz brakujące** to RimWorld Game, so Core/DLC automatic translation uses the same contextual glossary.
+- Added **Zastosuj do istniejących etykiet** for correcting already translated exact labels.
+- Glossary is stored persistently as `rimworld-glossary.csv` in Toolkit settings.
+- Existing placeholder protection remains active independently of glossary protection.
+
 ## 0.10.9 Experimental - 2026-08-06
 
 ### Custom Workshop description for RimWorld Mod

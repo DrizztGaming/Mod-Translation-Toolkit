@@ -7,7 +7,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-$AppVersion = "0.10.9"
+$AppVersion = "0.10.15"
 $script:UiLanguage = "pl"
 $script:Entries = New-Object System.Collections.ArrayList
 $script:Mods = New-Object System.Collections.ArrayList
@@ -1205,6 +1205,959 @@ function Translate-Configured([string]$text,[string]$sourceLang="en",[string]$ta
     }
 }
 
+
+
+# ---------- RimWorld contextual glossary ----------
+function Get-RimWorldGlossaryPath {
+    return (Join-Path (Get-ToolkitSettingsDirectory) "rimworld-glossary.csv")
+}
+
+function New-RimWorldGlossaryRule(
+    [string]$source,
+    [string]$target,
+    [string]$scope="All",
+    [string]$module="",
+    [string]$defType="",
+    [string]$field="",
+    [string]$packageId="",
+    [bool]$enabled=$true
+) {
+    return [pscustomobject]@{
+        Enabled = $enabled
+        Source = $source
+        Target = $target
+        Scope = $scope
+        Module = $module
+        DefType = $defType
+        Field = $field
+        PackageId = $packageId
+        Confidence = 0
+        Learned = $false
+    }
+}
+
+function Get-DefaultRimWorldGlossary {
+    # Conservative starter rule: only ThingDef.label, where "counter" is a
+    # furniture/object label rather than a generic verb/statistic term.
+    return @(
+        (New-RimWorldGlossaryRule "counter" "lada" "All" "" "ThingDef" "label" "" $true)
+    )
+}
+
+function Save-RimWorldGlossary($rules) {
+    $path = Get-RimWorldGlossaryPath
+    $rows = @($rules | Select-Object Enabled,Source,Target,Scope,Module,DefType,Field,PackageId,Confidence,Learned)
+    if ($rows.Count -eq 0) {
+        [System.IO.File]::WriteAllText(
+            $path,
+            "Enabled;Source;Target;Scope;Module;DefType;Field;PackageId;Confidence;Learned`r`n",
+            (New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false))
+        )
+        return $path
+    }
+
+    $tmp = "$path.tmp"
+    $rows | Export-Csv -LiteralPath $tmp -NoTypeInformation -Encoding UTF8 -Delimiter ';'
+    Move-Item -LiteralPath $tmp -Destination $path -Force
+    return $path
+}
+
+function Get-RimWorldGlossary {
+    $path = Get-RimWorldGlossaryPath
+    if (-not (Test-Path -LiteralPath $path)) {
+        $defaults = @(Get-DefaultRimWorldGlossary)
+        [void](Save-RimWorldGlossary $defaults)
+        return $defaults
+    }
+
+    try {
+        $rows = @(Import-Csv -LiteralPath $path -Encoding UTF8 -Delimiter ';')
+        $result = New-Object System.Collections.ArrayList
+
+        foreach ($r in $rows) {
+            if ([string]::IsNullOrWhiteSpace([string]$r.Source)) { continue }
+            if ([string]::IsNullOrWhiteSpace([string]$r.Target)) { continue }
+
+            $enabled = $true
+            try { $enabled = [System.Convert]::ToBoolean([string]$r.Enabled) } catch {}
+
+            $rule = New-RimWorldGlossaryRule `
+                    ([string]$r.Source) `
+                    ([string]$r.Target) `
+                    ([string]$r.Scope) `
+                    ([string]$r.Module) `
+                    ([string]$r.DefType) `
+                    ([string]$r.Field) `
+                    ([string]$r.PackageId) `
+                    $enabled
+
+            $confidence = 0
+            try { $confidence = [int]$r.Confidence } catch {}
+            $learned = $false
+            try { $learned = [System.Convert]::ToBoolean([string]$r.Learned) } catch {}
+
+            $rule.Confidence = $confidence
+            $rule.Learned = $learned
+            [void]$result.Add($rule)
+        }
+
+        return @($result)
+    } catch {
+        return @(Get-DefaultRimWorldGlossary)
+    }
+}
+
+function Get-RimWorldEntryGlossaryContext($entry, [string]$workflow) {
+    $defType = ""
+    $field = ""
+    $module = ""
+    $packageId = ""
+
+    if ($workflow -eq "Game") {
+        $module = [string]$entry.Module
+        $type = [string]$entry.Type
+        if ($type -match '^DefInjected/(.+)$') {
+            $defType = [string]$Matches[1]
+        }
+
+        $key = [string]$entry.Key
+        if ($key -match '\.([^.]+)$') {
+            $field = [string]$Matches[1]
+        }
+    } else {
+        $defType = [string]$entry.DefType
+        $field = [string]$entry.Field
+        $packageId = [string]$script:OriginalPackageId
+
+        if ([string]::IsNullOrWhiteSpace($defType)) {
+            $file = [string]$entry.File
+            if ($file -match '(?i)DefInjected[\\/]+([^\\/]+)') {
+                $defType = [string]$Matches[1]
+            }
+        }
+
+        if ([string]::IsNullOrWhiteSpace($field)) {
+            $key = [string]$entry.Key
+            if ($key -match '\.([^.]+)$') {
+                $field = [string]$Matches[1]
+            }
+        }
+    }
+
+    return [pscustomobject]@{
+        Workflow = $workflow
+        Module = $module
+        DefType = $defType
+        Field = $field
+        PackageId = $packageId
+    }
+}
+
+function Test-RimWorldGlossaryRuleMatches($rule, $context) {
+    if ($null -eq $rule -or $null -eq $context) { return $false }
+    if (-not [bool]$rule.Enabled) { return $false }
+
+    $scope = [string]$rule.Scope
+    if ([string]::IsNullOrWhiteSpace($scope)) { $scope = "All" }
+    if ($scope -ne "All" -and $scope -ne [string]$context.Workflow) { return $false }
+
+    if (-not [string]::IsNullOrWhiteSpace([string]$rule.Module) -and
+        ([string]$rule.Module) -ine ([string]$context.Module)) { return $false }
+
+    if (-not [string]::IsNullOrWhiteSpace([string]$rule.DefType) -and
+        ([string]$rule.DefType) -ine ([string]$context.DefType)) { return $false }
+
+    if (-not [string]::IsNullOrWhiteSpace([string]$rule.Field) -and
+        ([string]$rule.Field) -ine ([string]$context.Field)) { return $false }
+
+    if (-not [string]::IsNullOrWhiteSpace([string]$rule.PackageId) -and
+        ([string]$rule.PackageId) -ine ([string]$context.PackageId)) { return $false }
+
+    return $true
+}
+
+function Get-MatchingRimWorldGlossaryRules($entry, [string]$workflow) {
+    $context = Get-RimWorldEntryGlossaryContext $entry $workflow
+    $rules = @(Get-RimWorldGlossary)
+    return @($rules | Where-Object { Test-RimWorldGlossaryRuleMatches $_ $context })
+}
+
+function Protect-RimWorldGlossaryTerms([string]$text, $rules, [ref]$mapRef) {
+    $map = [ordered]@{}
+    $result = [string]$text
+    $index = 0
+
+    # Longer source terms first, so a short term cannot consume part of a longer one.
+    $orderedRules = @($rules | Sort-Object @{Expression={([string]$_.Source).Length};Descending=$true})
+
+    foreach ($rule in $orderedRules) {
+        $source = [string]$rule.Source
+        $target = [string]$rule.Target
+        if ([string]::IsNullOrWhiteSpace($source) -or [string]::IsNullOrWhiteSpace($target)) { continue }
+
+        $token = "ZXQGLOSS{0:D4}QXZ" -f $index
+
+        # Whole-word matching for simple terms. Multi-word terms are matched as an
+        # exact phrase. This avoids "counter" matching inside "counterattack".
+        $escaped = [regex]::Escape($source)
+        if ($source -match '^[\p{L}\p{N}_-]+$') {
+            $pattern = "(?i)(?<![\p{L}\p{N}_])$escaped(?![\p{L}\p{N}_])"
+        } else {
+            $pattern = "(?i)$escaped"
+        }
+
+        if ([regex]::IsMatch($result, $pattern)) {
+            $result = [regex]::Replace($result, $pattern, $token)
+            $map[$token] = $target
+            $index++
+        }
+    }
+
+    $mapRef.Value = $map
+    return $result
+}
+
+function Restore-RimWorldGlossaryTerms([string]$text, $map) {
+    $result = [string]$text
+    if ($null -eq $map) { return $result }
+
+    foreach ($token in $map.Keys) {
+        $target = [string]$map[$token]
+        $result = $result.Replace([string]$token, $target)
+
+        # Tolerate providers inserting spaces into the alphanumeric token.
+        $chars = ([string]$token).ToCharArray() | ForEach-Object { [regex]::Escape([string]$_) }
+        $pattern = "(?i)" + ($chars -join '\s*')
+        $result = [regex]::Replace($result, $pattern, [System.Text.RegularExpressions.MatchEvaluator]{
+            param($m)
+            return $target
+        })
+    }
+
+    return $result
+}
+
+function Translate-RimWorldEntryWithGlossary($entry, [string]$workflow, [string]$sourceLang, [string]$targetLang) {
+    $source = [string]$entry.Source
+    if ([string]::IsNullOrWhiteSpace($source)) { return $source }
+
+    $rules = @(Get-MatchingRimWorldGlossaryRules $entry $workflow)
+    if ($rules.Count -eq 0) {
+        return (Translate-Configured $source $sourceLang $targetLang)
+    }
+
+    # Exact whole-entry rule bypasses the provider entirely.
+    foreach ($rule in $rules) {
+        if ($source.Trim() -ieq ([string]$rule.Source).Trim()) {
+            return [string]$rule.Target
+        }
+    }
+
+    $map = $null
+    $protected = Protect-RimWorldGlossaryTerms $source $rules ([ref]$map)
+    $translated = Translate-Configured $protected $sourceLang $targetLang
+    $restored = Restore-RimWorldGlossaryTerms $translated $map
+
+    # Never save an internal glossary token.
+    if ($restored -match '(?i)ZXQ\s*GLOSS') {
+        throw "Glossary token restoration failed."
+    }
+
+    return $restored
+}
+
+function Apply-RimWorldGlossaryToExistingEntry($entry, [string]$workflow) {
+    $source = [string]$entry.Source
+    if ([string]::IsNullOrWhiteSpace($source)) { return $false }
+
+    $rules = @(Get-MatchingRimWorldGlossaryRules $entry $workflow)
+    if ($rules.Count -eq 0) { return $false }
+
+    foreach ($rule in $rules) {
+        if ($source.Trim() -ieq ([string]$rule.Source).Trim()) {
+            if ([string]$entry.Translation -cne [string]$rule.Target) {
+                $entry.Translation = [string]$rule.Target
+                return $true
+            }
+        }
+    }
+
+    return $false
+}
+
+
+# ---------- RimWorld terminology learning ----------
+$script:RimWorldLearningBaseline = @{}
+$script:RimWorldLearningEditOldValue = @{}
+
+function Get-RimWorldLearningIdentity($entry, [string]$workflow) {
+    if ($null -eq $entry) { return "" }
+
+    if ($workflow -eq "Game") {
+        return ("Game|$([string]$entry.Module)|$([string]$entry.Type)|$([string]$entry.Key)").ToLowerInvariant()
+    }
+
+    return ("Mod|$([string]$script:OriginalPackageId)|$([string]$entry.Kind)|$([string]$entry.File)|$([string]$entry.Key)").ToLowerInvariant()
+}
+
+function Set-RimWorldLearningBaseline($entry, [string]$workflow, [string]$machineTranslation) {
+    $id = Get-RimWorldLearningIdentity $entry $workflow
+    if ([string]::IsNullOrWhiteSpace($id)) { return }
+    $script:RimWorldLearningBaseline[$id] = [string]$machineTranslation
+}
+
+function Get-RimWorldLearningBaseline($entry, [string]$workflow) {
+    $id = Get-RimWorldLearningIdentity $entry $workflow
+    if ([string]::IsNullOrWhiteSpace($id)) { return $null }
+    if ($script:RimWorldLearningBaseline.ContainsKey($id)) {
+        return [string]$script:RimWorldLearningBaseline[$id]
+    }
+    return $null
+}
+
+function Get-RimWorldLearnedRuleSpecificity($entry, [string]$workflow) {
+    $ctx = Get-RimWorldEntryGlossaryContext $entry $workflow
+
+    return [pscustomobject]@{
+        Scope = $workflow
+        Module = $(if ($workflow -eq "Game") { [string]$ctx.Module } else { "" })
+        DefType = [string]$ctx.DefType
+        Field = [string]$ctx.Field
+        PackageId = $(if ($workflow -eq "Mod") { [string]$ctx.PackageId } else { "" })
+    }
+}
+
+function Find-RimWorldLearnedRule($rules, [string]$source, [string]$target, $spec) {
+    return @($rules | Where-Object {
+        [bool]$_.Learned -and
+        ([string]$_.Source).Trim() -ieq $source.Trim() -and
+        ([string]$_.Target).Trim() -ieq $target.Trim() -and
+        ([string]$_.Scope) -ieq ([string]$spec.Scope) -and
+        ([string]$_.Module) -ieq ([string]$spec.Module) -and
+        ([string]$_.DefType) -ieq ([string]$spec.DefType) -and
+        ([string]$_.Field) -ieq ([string]$spec.Field) -and
+        ([string]$_.PackageId) -ieq ([string]$spec.PackageId)
+    } | Select-Object -First 1)
+}
+
+function Register-RimWorldCorrectionLearning($entry, [string]$workflow, [string]$oldMachineTranslation, [string]$correctedTranslation, [bool]$askFirst=$true) {
+    if ($null -eq $entry) { return $null }
+
+    $source = ([string]$entry.Source).Trim()
+    $oldValue = ([string]$oldMachineTranslation).Trim()
+    $newValue = ([string]$correctedTranslation).Trim()
+
+    if ([string]::IsNullOrWhiteSpace($source)) { return $null }
+    if ([string]::IsNullOrWhiteSpace($newValue)) { return $null }
+    if ($newValue -ceq $oldValue) { return $null }
+
+    $spec = Get-RimWorldLearnedRuleSpecificity $entry $workflow
+    $rules = New-Object System.Collections.ArrayList
+    foreach ($r in @(Get-RimWorldGlossary)) { [void]$rules.Add($r) }
+
+    $existing = @(Find-RimWorldLearnedRule $rules $source $newValue $spec)
+    if ($existing.Count -gt 0) {
+        $rule = $existing[0]
+        $rule.Confidence = [Math]::Min(99, ([int]$rule.Confidence + 1))
+        if ([int]$rule.Confidence -ge 3) {
+            $rule.Enabled = $true
+        }
+        [void](Save-RimWorldGlossary @($rules))
+        return $rule
+    }
+
+    if ($askFirst) {
+        $contextText = @(
+            $(if (-not [string]::IsNullOrWhiteSpace([string]$spec.Module)) { "Module/DLC: $($spec.Module)" }),
+            $(if (-not [string]::IsNullOrWhiteSpace([string]$spec.DefType)) { "DefType: $($spec.DefType)" }),
+            $(if (-not [string]::IsNullOrWhiteSpace([string]$spec.Field)) { "Field: $($spec.Field)" }),
+            $(if (-not [string]::IsNullOrWhiteSpace([string]$spec.PackageId)) { "PackageId: $($spec.PackageId)" })
+        ) | Where-Object { $_ }
+
+        $msg = if ($script:UiLanguage -eq "en") {
+            "You changed an automatic translation.`n`nSource:`n$source`n`nAutomatic:`n$oldValue`n`nCorrection:`n$newValue`n`n$($contextText -join "`n")`n`nRemember this correction? After 3 consistent corrections the learned rule will activate automatically."
+        } else {
+            "Zmieniono wynik automatycznego tłumaczenia.`n`nŹródło:`n$source`n`nAutomatycznie:`n$oldValue`n`nPoprawka:`n$newValue`n`n$($contextText -join "`n")`n`nZapamiętać tę poprawkę? Po 3 zgodnych korektach nauczona reguła włączy się automatycznie."
+        }
+
+        $ans = [System.Windows.MessageBox]::Show(
+            $msg,
+            "RimWorld - uczenie glosariusza",
+            [System.Windows.MessageBoxButton]::YesNo,
+            [System.Windows.MessageBoxImage]::Question
+        )
+        if ($ans -ne [System.Windows.MessageBoxResult]::Yes) { return $null }
+    }
+
+    $rule = New-RimWorldGlossaryRule `
+        $source `
+        $newValue `
+        ([string]$spec.Scope) `
+        ([string]$spec.Module) `
+        ([string]$spec.DefType) `
+        ([string]$spec.Field) `
+        ([string]$spec.PackageId) `
+        $false
+
+    $rule.Confidence = 1
+    $rule.Learned = $true
+    [void]$rules.Add($rule)
+    [void](Save-RimWorldGlossary @($rules))
+    return $rule
+}
+
+function Get-RimWorldLearningModePath {
+    return (Join-Path (Get-ToolkitSettingsDirectory) "rimworld-learning-mode.txt")
+}
+
+function Get-RimWorldLearningMode {
+    $path = Get-RimWorldLearningModePath
+    if (-not (Test-Path -LiteralPath $path)) { return "Silent" }
+    try {
+        $mode = (Get-Content -LiteralPath $path -Raw -Encoding UTF8).Trim()
+        if ($mode -in @("Silent","Ask","Off")) { return $mode }
+    } catch {}
+    return "Silent"
+}
+
+function Set-RimWorldLearningMode([string]$mode) {
+    if ($mode -notin @("Silent","Ask","Off")) { $mode = "Silent" }
+    [System.IO.File]::WriteAllText(
+        (Get-RimWorldLearningModePath),
+        $mode,
+        (New-Object -TypeName System.Text.UTF8Encoding -ArgumentList @($false))
+    )
+    Update-RimWorldLearningUi
+    return $mode
+}
+
+function Get-RimWorldLearningSuggestionPath {
+    return (Join-Path (Get-ToolkitSettingsDirectory) "rimworld-learning-suggestions.csv")
+}
+
+function Get-RimWorldLearningSuggestions {
+    $path = Get-RimWorldLearningSuggestionPath
+    if (-not (Test-Path -LiteralPath $path)) { return @() }
+    try {
+        return @(Import-Csv -LiteralPath $path -Encoding UTF8 -Delimiter ';')
+    } catch {
+        return @()
+    }
+}
+
+function Save-RimWorldLearningSuggestions($items) {
+    $path = Get-RimWorldLearningSuggestionPath
+    $rows = @($items | Select-Object Source,Target,Workflow,Module,DefType,Field,PackageId,Count,LastSeen)
+    if ($rows.Count -eq 0) {
+        if (Test-Path -LiteralPath $path) { Remove-Item -LiteralPath $path -Force }
+        Update-RimWorldLearningUi
+        return
+    }
+
+    $tmp = "$path.tmp"
+    $rows | Export-Csv -LiteralPath $tmp -NoTypeInformation -Encoding UTF8 -Delimiter ';'
+    Move-Item -LiteralPath $tmp -Destination $path -Force
+    Update-RimWorldLearningUi
+}
+
+function Get-RimWorldLearningSuggestionIdentity($item) {
+    return (
+        "$([string]$item.Workflow)|$([string]$item.Source)|$([string]$item.Target)|" +
+        "$([string]$item.Module)|$([string]$item.DefType)|$([string]$item.Field)|$([string]$item.PackageId)"
+    ).ToLowerInvariant()
+}
+
+function Add-RimWorldLearningSuggestion($entry, [string]$workflow, [string]$correctedTranslation) {
+    if ($null -eq $entry) { return $null }
+
+    $source = ([string]$entry.Source).Trim()
+    $target = ([string]$correctedTranslation).Trim()
+    if ([string]::IsNullOrWhiteSpace($source) -or [string]::IsNullOrWhiteSpace($target)) { return $null }
+
+    $spec = Get-RimWorldLearnedRuleSpecificity $entry $workflow
+    $candidate = [pscustomobject]@{
+        Source = $source
+        Target = $target
+        Workflow = $workflow
+        Module = [string]$spec.Module
+        DefType = [string]$spec.DefType
+        Field = [string]$spec.Field
+        PackageId = [string]$spec.PackageId
+        Count = 1
+        LastSeen = (Get-Date).ToString("s")
+    }
+
+    $items = New-Object System.Collections.ArrayList
+    foreach ($i in @(Get-RimWorldLearningSuggestions)) { [void]$items.Add($i) }
+
+    $id = Get-RimWorldLearningSuggestionIdentity $candidate
+    $found = $null
+    foreach ($i in @($items)) {
+        if ((Get-RimWorldLearningSuggestionIdentity $i) -eq $id) {
+            $found = $i
+            break
+        }
+    }
+
+    if ($null -ne $found) {
+        $count = 1
+        try { $count = [int]$found.Count + 1 } catch {}
+        $found.Count = $count
+        $found.LastSeen = (Get-Date).ToString("s")
+        $candidate = $found
+    } else {
+        [void]$items.Add($candidate)
+    }
+
+    Save-RimWorldLearningSuggestions @($items)
+    return $candidate
+}
+
+function Accept-RimWorldLearningSuggestion($suggestion) {
+    if ($null -eq $suggestion) { return $null }
+
+    $rules = New-Object System.Collections.ArrayList
+    foreach ($r in @(Get-RimWorldGlossary)) { [void]$rules.Add($r) }
+
+    $spec = [pscustomobject]@{
+        Scope = [string]$suggestion.Workflow
+        Module = [string]$suggestion.Module
+        DefType = [string]$suggestion.DefType
+        Field = [string]$suggestion.Field
+        PackageId = [string]$suggestion.PackageId
+    }
+
+    $existing = @(Find-RimWorldLearnedRule $rules ([string]$suggestion.Source) ([string]$suggestion.Target) $spec)
+    $increment = 1
+    try { $increment = [Math]::Max(1, [int]$suggestion.Count) } catch {}
+
+    if ($existing.Count -gt 0) {
+        $rule = $existing[0]
+        $rule.Confidence = [Math]::Min(99, ([int]$rule.Confidence + $increment))
+    } else {
+        $rule = New-RimWorldGlossaryRule `
+            ([string]$suggestion.Source) `
+            ([string]$suggestion.Target) `
+            ([string]$spec.Scope) `
+            ([string]$spec.Module) `
+            ([string]$spec.DefType) `
+            ([string]$spec.Field) `
+            ([string]$spec.PackageId) `
+            $false
+        $rule.Confidence = $increment
+        $rule.Learned = $true
+        [void]$rules.Add($rule)
+    }
+
+    if ([int]$rule.Confidence -ge 3) {
+        $rule.Enabled = $true
+    }
+
+    [void](Save-RimWorldGlossary @($rules))
+    return $rule
+}
+
+function Remove-RimWorldLearningSuggestionsByIdentity($toRemove) {
+    $removeIds = @{}
+    foreach ($r in @($toRemove)) {
+        $removeIds[(Get-RimWorldLearningSuggestionIdentity $r)] = $true
+    }
+
+    $remaining = @(
+        Get-RimWorldLearningSuggestions | Where-Object {
+            -not $removeIds.ContainsKey((Get-RimWorldLearningSuggestionIdentity $_))
+        }
+    )
+    Save-RimWorldLearningSuggestions $remaining
+}
+
+function Get-RimWorldLearningSuggestionCount([string]$workflow="") {
+    $items = @(Get-RimWorldLearningSuggestions)
+    if (-not [string]::IsNullOrWhiteSpace($workflow)) {
+        $items = @($items | Where-Object { ([string]$_.Workflow) -eq $workflow })
+    }
+    return $items.Count
+}
+
+function Get-RimWorldLearningModeLabel {
+    $mode = Get-RimWorldLearningMode
+    if ($script:UiLanguage -eq "en") {
+        switch ($mode) {
+            "Ask" { return "Learning: Ask" }
+            "Off" { return "Learning: Off" }
+            default { return "Learning: Silent" }
+        }
+    }
+
+    switch ($mode) {
+        "Ask" { return "Nauka: Pytaj" }
+        "Off" { return "Nauka: Wyłączona" }
+        default { return "Nauka: Ciche" }
+    }
+}
+
+function Update-RimWorldLearningUi {
+    try {
+        $modeText = Get-RimWorldLearningModeLabel
+        $gameCount = Get-RimWorldLearningSuggestionCount "Game"
+        $modCount = Get-RimWorldLearningSuggestionCount "Mod"
+
+        if ($null -ne $btnRimWorldGameLearningMode) { $btnRimWorldGameLearningMode.Content = $modeText }
+        if ($null -ne $btnRimWorldModLearningMode) { $btnRimWorldModLearningMode.Content = $modeText }
+
+        if ($null -ne $btnRimWorldGameLearningSuggestions) {
+            $btnRimWorldGameLearningSuggestions.Content = $(if ($script:UiLanguage -eq "en") { "Suggestions: $gameCount" } else { "Propozycje: $gameCount" })
+        }
+        if ($null -ne $btnRimWorldModLearningSuggestions) {
+            $btnRimWorldModLearningSuggestions.Content = $(if ($script:UiLanguage -eq "en") { "Suggestions: $modCount" } else { "Propozycje: $modCount" })
+        }
+    } catch {}
+}
+
+function Cycle-RimWorldLearningMode {
+    $current = Get-RimWorldLearningMode
+    $next = switch ($current) {
+        "Silent" { "Ask" }
+        "Ask" { "Off" }
+        default { "Silent" }
+    }
+    [void](Set-RimWorldLearningMode $next)
+    return $next
+}
+
+function Show-RimWorldLearningSuggestionReview([string]$workflow) {
+    $all = @(Get-RimWorldLearningSuggestions)
+    $visible = New-Object System.Collections.ObjectModel.ObservableCollection[object]
+
+    foreach ($s in @($all | Where-Object { ([string]$_.Workflow) -eq $workflow })) {
+        $count = 1
+        try { $count = [int]$s.Count } catch {}
+        $visible.Add([pscustomobject]@{
+            Source = [string]$s.Source
+            Target = [string]$s.Target
+            Workflow = [string]$s.Workflow
+            Module = [string]$s.Module
+            DefType = [string]$s.DefType
+            Field = [string]$s.Field
+            PackageId = [string]$s.PackageId
+            Count = $count
+            LastSeen = [string]$s.LastSeen
+        })
+    }
+
+    [xml]$reviewXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="RimWorld - Propozycje glosariusza"
+        Width="1200" Height="650" MinWidth="900" MinHeight="450"
+        WindowStartupLocation="CenterOwner"
+        Background="#121018" Foreground="#ECE8F6">
+  <Grid Margin="14">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+
+    <TextBlock Name="txtReviewInfo" Grid.Row="0" Margin="0,0,0,10" Foreground="#B9AEC9" TextWrapping="Wrap"
+               Text="Ciche uczenie zbiera tutaj ręczne poprawki. Licznik pokazuje, ile razy pojawiła się ta sama korekta. Po akceptacji pewność reguły rośnie; od 3 reguła może działać automatycznie."/>
+
+    <DataGrid Name="gridSuggestions" Grid.Row="1" AutoGenerateColumns="False" CanUserAddRows="False"
+              CanUserDeleteRows="False" IsReadOnly="True" SelectionMode="Extended"
+              Background="#1B1723" Foreground="#ECE8F6" BorderBrush="#4A3B5B"
+              RowBackground="#1B1723" AlternatingRowBackground="#211A2B">
+      <DataGrid.Columns>
+        <DataGridTextColumn Header="Source" Binding="{Binding Source}" Width="220"/>
+        <DataGridTextColumn Header="Propozycja" Binding="{Binding Target}" Width="220"/>
+        <DataGridTextColumn Header="Ile razy" Binding="{Binding Count}" Width="75"/>
+        <DataGridTextColumn Header="Module/DLC" Binding="{Binding Module}" Width="100"/>
+        <DataGridTextColumn Header="DefType" Binding="{Binding DefType}" Width="110"/>
+        <DataGridTextColumn Header="Field" Binding="{Binding Field}" Width="90"/>
+        <DataGridTextColumn Header="PackageId" Binding="{Binding PackageId}" Width="*"/>
+      </DataGrid.Columns>
+    </DataGrid>
+
+    <Grid Grid.Row="2" Margin="0,12,0,0">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="Auto"/>
+      </Grid.ColumnDefinitions>
+      <StackPanel Grid.Column="0" Orientation="Horizontal">
+        <Button Name="btnAcceptSelected" Content="Akceptuj zaznaczone" Padding="12,7" Margin="0,0,8,0"/>
+        <Button Name="btnAcceptAll" Content="Akceptuj wszystkie" Padding="12,7" Margin="0,0,8,0"/>
+        <Button Name="btnRejectSelected" Content="Odrzuć zaznaczone" Padding="12,7" Margin="0,0,8,0"/>
+        <Button Name="btnRejectAll" Content="Odrzuć wszystkie" Padding="12,7"/>
+      </StackPanel>
+      <Button Grid.Column="1" Name="btnClose" Content="Zamknij" Padding="18,7"/>
+    </Grid>
+  </Grid>
+</Window>
+'@
+
+    $reader = New-Object System.Xml.XmlNodeReader $reviewXaml
+    $review = [Windows.Markup.XamlReader]::Load($reader)
+    try { $review.Owner = $window } catch {}
+
+    $gridSuggestions = $review.FindName("gridSuggestions")
+    $btnAcceptSelected = $review.FindName("btnAcceptSelected")
+    $btnAcceptAll = $review.FindName("btnAcceptAll")
+    $btnRejectSelected = $review.FindName("btnRejectSelected")
+    $btnRejectAll = $review.FindName("btnRejectAll")
+    $btnClose = $review.FindName("btnClose")
+
+    $gridSuggestions.ItemsSource = $visible
+
+    $refresh = {
+        $gridSuggestions.ItemsSource = $null
+        $gridSuggestions.ItemsSource = $visible
+        Update-RimWorldLearningUi
+    }
+
+    $acceptItems = {
+        param($items)
+        $chosen = @($items)
+        if ($chosen.Count -eq 0) { return }
+        foreach ($s in $chosen) {
+            [void](Accept-RimWorldLearningSuggestion $s)
+            [void]$visible.Remove($s)
+        }
+        Remove-RimWorldLearningSuggestionsByIdentity $chosen
+        & $refresh
+    }
+
+    $rejectItems = {
+        param($items)
+        $chosen = @($items)
+        if ($chosen.Count -eq 0) { return }
+        foreach ($s in $chosen) { [void]$visible.Remove($s) }
+        Remove-RimWorldLearningSuggestionsByIdentity $chosen
+        & $refresh
+    }
+
+    $btnAcceptSelected.Add_Click({ & $acceptItems @($gridSuggestions.SelectedItems) })
+    $btnAcceptAll.Add_Click({ & $acceptItems @($visible) })
+    $btnRejectSelected.Add_Click({ & $rejectItems @($gridSuggestions.SelectedItems) })
+    $btnRejectAll.Add_Click({ & $rejectItems @($visible) })
+    $btnClose.Add_Click({ $review.Close() })
+
+    [void]$review.ShowDialog()
+}
+
+function Handle-RimWorldManualTranslationEdit($entry, [string]$workflow, [string]$newValue) {
+    if ($null -eq $entry) { return }
+
+    $baseline = Get-RimWorldLearningBaseline $entry $workflow
+    if ($null -eq $baseline) { return }
+
+    $corrected = [string]$newValue
+    if ($corrected.Trim() -ceq ([string]$baseline).Trim()) { return }
+
+    $mode = Get-RimWorldLearningMode
+
+    if ($mode -eq "Ask") {
+        $rule = Register-RimWorldCorrectionLearning $entry $workflow $baseline $corrected $true
+        if ($null -ne $rule) {
+            $confidence = [int]$rule.Confidence
+            $active = [bool]$rule.Enabled
+            $msg = if ($script:UiLanguage -eq "en") {
+                "Learned correction saved. Confidence: $confidence/3. Active: $active"
+            } else {
+                "Zapamiętano poprawkę. Pewność: $confidence/3. Aktywna: $active"
+            }
+            if ($workflow -eq "Game") { Set-ControlTextSafe $txtRimWorldGameStatus $msg }
+            else { Set-ControlTextSafe $txtStatus $msg }
+        }
+    } elseif ($mode -eq "Silent") {
+        [void](Add-RimWorldLearningSuggestion $entry $workflow $corrected)
+        $count = Get-RimWorldLearningSuggestionCount $workflow
+        $msg = if ($script:UiLanguage -eq "en") {
+            "Learning suggestion queued. Suggestions: $count"
+        } else {
+            "Poprawka dodana do cichej nauki. Propozycje: $count"
+        }
+        if ($workflow -eq "Game") { Set-ControlTextSafe $txtRimWorldGameStatus $msg }
+        else { Set-ControlTextSafe $txtStatus $msg }
+    }
+
+    # Always consume this baseline after the edit. A future automatic translation
+    # can establish a new baseline.
+    $id = Get-RimWorldLearningIdentity $entry $workflow
+    if ($script:RimWorldLearningBaseline.ContainsKey($id)) {
+        $script:RimWorldLearningBaseline.Remove($id)
+    }
+    Update-RimWorldLearningUi
+}
+
+function Show-RimWorldLearningStats {
+    $rules = @(Get-RimWorldGlossary | Where-Object { [bool]$_.Learned })
+    $active = @($rules | Where-Object { [bool]$_.Enabled }).Count
+    $pending = @($rules | Where-Object { -not [bool]$_.Enabled }).Count
+
+    return [pscustomobject]@{
+        Total = $rules.Count
+        Active = $active
+        Pending = $pending
+    }
+}
+
+function Show-RimWorldGlossaryEditor([string]$workflow) {
+    $rules = New-Object System.Collections.ObjectModel.ObservableCollection[object]
+    foreach ($r in @(Get-RimWorldGlossary)) {
+        $rules.Add([pscustomobject]@{
+            Enabled = [bool]$r.Enabled
+            Source = [string]$r.Source
+            Target = [string]$r.Target
+            Scope = [string]$r.Scope
+            Module = [string]$r.Module
+            DefType = [string]$r.DefType
+            Field = [string]$r.Field
+            PackageId = [string]$r.PackageId
+            Confidence = [int]$r.Confidence
+            Learned = [bool]$r.Learned
+        })
+    }
+
+    [xml]$glossaryXaml = @'
+<Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="RimWorld - Glosariusz kontekstowy"
+        Width="1180" Height="660"
+        MinWidth="900" MinHeight="480"
+        WindowStartupLocation="CenterOwner"
+        Background="#121018" Foreground="#ECE8F6">
+  <Grid Margin="14">
+    <Grid.RowDefinitions>
+      <RowDefinition Height="Auto"/>
+      <RowDefinition Height="*"/>
+      <RowDefinition Height="Auto"/>
+    </Grid.RowDefinitions>
+
+    <TextBlock Grid.Row="0" Margin="0,0,0,10" Foreground="#B9AEC9" TextWrapping="Wrap"
+               Text="Reguły są stosowane przed automatycznym tłumaczeniem. Scope: All, Game lub Mod. Puste pola Module / DefType / Field / PackageId oznaczają dowolną wartość."/>
+
+    <DataGrid Name="gridGlossary" Grid.Row="1" AutoGenerateColumns="False" CanUserAddRows="True"
+              CanUserDeleteRows="True" Background="#1B1723" Foreground="#ECE8F6"
+              BorderBrush="#4A3B5B" RowBackground="#1B1723" AlternatingRowBackground="#211A2B">
+      <DataGrid.Columns>
+        <DataGridCheckBoxColumn Header="On" Binding="{Binding Enabled}" Width="45"/>
+        <DataGridTextColumn Header="Source" Binding="{Binding Source}" Width="145"/>
+        <DataGridTextColumn Header="Target" Binding="{Binding Target}" Width="145"/>
+        <DataGridTextColumn Header="Scope" Binding="{Binding Scope}" Width="75"/>
+        <DataGridTextColumn Header="Module/DLC" Binding="{Binding Module}" Width="110"/>
+        <DataGridTextColumn Header="DefType" Binding="{Binding DefType}" Width="115"/>
+        <DataGridTextColumn Header="Field" Binding="{Binding Field}" Width="95"/>
+        <DataGridTextColumn Header="PackageId moda" Binding="{Binding PackageId}" Width="*"/>
+        <DataGridTextColumn Header="Pewność" Binding="{Binding Confidence}" Width="70" IsReadOnly="True"/>
+        <DataGridCheckBoxColumn Header="Nauczona" Binding="{Binding Learned}" Width="75" IsReadOnly="True"/>
+      </DataGrid.Columns>
+    </DataGrid>
+
+    <Grid Grid.Row="2" Margin="0,12,0,0">
+      <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="Auto"/>
+      </Grid.ColumnDefinitions>
+      <StackPanel Grid.Column="0" Orientation="Horizontal">
+        <Button Name="btnAdd" Content="Dodaj regułę" Padding="12,7" Margin="0,0,8,0"/>
+        <Button Name="btnDefaults" Content="Dodaj domyślne" Padding="12,7" Margin="0,0,8,0"/>
+        <Button Name="btnApplyExisting" Content="Zastosuj do istniejących etykiet" Padding="12,7"/>
+      </StackPanel>
+      <StackPanel Grid.Column="1" Orientation="Horizontal">
+        <Button Name="btnCancel" Content="Anuluj" Padding="16,7" Margin="0,0,8,0"/>
+        <Button Name="btnSave" Content="Zapisz glosariusz" Padding="16,7" Background="#7A3FC2" Foreground="White"/>
+      </StackPanel>
+    </Grid>
+  </Grid>
+</Window>
+'@
+
+    $reader = New-Object System.Xml.XmlNodeReader $glossaryXaml
+    $editor = [Windows.Markup.XamlReader]::Load($reader)
+    try { $editor.Owner = $window } catch {}
+
+    $gridGlossary = $editor.FindName("gridGlossary")
+    $btnAdd = $editor.FindName("btnAdd")
+    $btnDefaults = $editor.FindName("btnDefaults")
+    $btnApplyExisting = $editor.FindName("btnApplyExisting")
+    $btnCancel = $editor.FindName("btnCancel")
+    $btnSave = $editor.FindName("btnSave")
+
+    $gridGlossary.ItemsSource = $rules
+
+    $btnAdd.Add_Click({
+        $rules.Add([pscustomobject]@{
+            Enabled = $true
+            Source = ""
+            Target = ""
+            Scope = $workflow
+            Module = ""
+            DefType = ""
+            Field = ""
+            PackageId = $(if ($workflow -eq "Mod") { [string]$script:OriginalPackageId } else { "" })
+            Confidence = 0
+            Learned = $false
+        })
+    })
+
+    $btnDefaults.Add_Click({
+        foreach ($d in @(Get-DefaultRimWorldGlossary)) {
+            $exists = @($rules | Where-Object {
+                ([string]$_.Source) -ieq ([string]$d.Source) -and
+                ([string]$_.Target) -ieq ([string]$d.Target) -and
+                ([string]$_.DefType) -ieq ([string]$d.DefType) -and
+                ([string]$_.Field) -ieq ([string]$d.Field)
+            }).Count -gt 0
+            if (-not $exists) {
+                $rules.Add($d)
+            }
+        }
+    })
+
+    $btnApplyExisting.Add_Click({
+        try {
+            [void]$gridGlossary.CommitEdit([System.Windows.Controls.DataGridEditingUnit]::Cell, $true)
+            [void]$gridGlossary.CommitEdit([System.Windows.Controls.DataGridEditingUnit]::Row, $true)
+        } catch {}
+        [void](Save-RimWorldGlossary @($rules))
+
+        $changed = 0
+        if ($workflow -eq "Game") {
+            foreach ($e in @($script:RimWorldGameEntries)) {
+                if (Apply-RimWorldGlossaryToExistingEntry $e "Game") { $changed++ }
+            }
+            Apply-RimWorldGameFilter
+            Set-ControlTextSafe $txtRimWorldGameStatus "Glosariusz: poprawiono $changed istniejących etykiet."
+        } else {
+            foreach ($e in @($script:Entries)) {
+                if (Apply-RimWorldGlossaryToExistingEntry $e "Mod") { $changed++ }
+            }
+            Refresh-Grid
+            Set-ControlTextSafe $txtStatus "Glosariusz: poprawiono $changed istniejących etykiet."
+        }
+    })
+
+    $btnCancel.Add_Click({
+        $editor.DialogResult = $false
+        $editor.Close()
+    })
+
+    $btnSave.Add_Click({
+        try {
+            [void]$gridGlossary.CommitEdit([System.Windows.Controls.DataGridEditingUnit]::Cell, $true)
+            [void]$gridGlossary.CommitEdit([System.Windows.Controls.DataGridEditingUnit]::Row, $true)
+        } catch {}
+
+        $clean = @($rules | Where-Object {
+            -not [string]::IsNullOrWhiteSpace([string]$_.Source) -and
+            -not [string]::IsNullOrWhiteSpace([string]$_.Target)
+        })
+        [void](Save-RimWorldGlossary $clean)
+        $editor.DialogResult = $true
+        $editor.Close()
+    })
+
+    [void]$editor.ShowDialog()
+}
 
 # ---------- Central language registry ----------
 $script:Languages = @(
@@ -4315,6 +5268,49 @@ function Replace-InFilteredTranslations([string]$search, [string]$replacement, [
 }
 
 
+function Get-RimWorldTranslationContentShape([string]$modPath) {
+    $languageFiles = 0
+    $hasGameplayContent = $false
+    $gameplayFolders = @("Defs","Patches","Assemblies","Textures","Sounds","Shaders","Source")
+
+    try {
+        foreach ($langDir in @(Get-ChildItem -LiteralPath $modPath -Directory -Recurse -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -eq "Languages" })) {
+
+            $languageFiles += @(Get-ChildItem -LiteralPath $langDir.FullName -File -Recurse -ErrorAction SilentlyContinue |
+                Where-Object { $_.Extension -in @(".xml",".txt") }).Count
+        }
+
+        foreach ($dir in @(Get-ChildItem -LiteralPath $modPath -Directory -Recurse -ErrorAction SilentlyContinue)) {
+            if ($gameplayFolders -contains [string]$dir.Name) {
+                # Do not count folders located under Languages as gameplay payload.
+                if ($dir.FullName -notmatch '(?i)[\\/]Languages[\\/]') {
+                    $hasGameplayContent = $true
+                    break
+                }
+            }
+        }
+    } catch {}
+
+    return [pscustomobject]@{
+        LanguageFiles = $languageFiles
+        HasGameplayContent = $hasGameplayContent
+        TranslationOnly = ($languageFiles -gt 0 -and -not $hasGameplayContent)
+    }
+}
+
+function Test-RimWorldTranslationReferenceResolves([string]$packageId, [string]$excludePath = "") {
+    if ([string]::IsNullOrWhiteSpace($packageId)) { return $false }
+    if (Test-IsFrameworkDependency $packageId) { return $false }
+
+    try {
+        $m = Find-ModByPackageId $packageId $excludePath
+        return ($null -ne $m)
+    } catch {
+        return $false
+    }
+}
+
 function Get-TranslationModInfo([string]$modPath) {
     $info = [ordered]@{
         Name = Split-Path $modPath -Leaf
@@ -4325,6 +5321,12 @@ function Get-TranslationModInfo([string]$modPath) {
         IsTranslationMod = $false
         TargetCode = ""
         ToolkitGenerated = $false
+        DescriptionTranslationSignal = $false
+        TranslationOnlyContent = $false
+        LanguageFileCount = 0
+        ClassificationScore = 0
+        ClassificationSignals = @()
+        ReferencedOriginalPackageId = ""
     }
 
     $about = Join-Path $modPath "About\About.xml"
@@ -4365,34 +5367,113 @@ function Get-TranslationModInfo([string]$modPath) {
 
             $desc = $x.ModMetaData.SelectSingleNode("description")
             if ($null -ne $desc) {
-                $descriptionText = $desc.InnerText
+                $descriptionText = [string]$desc.InnerText
                 if ($descriptionText -match 'Mod Translation Toolkit|github\.com/DrizztGaming/Mod-Translation-Toolkit') {
                     $info.ToolkitGenerated = $true
+                }
+
+                if ($descriptionText -match '(?i)\btranslation\b|tłumaczenie|tlumaczenie|requires?\s+(the\s+)?original\s+mod|wymaga\s+oryginalnego\s+moda') {
+                    $info.DescriptionTranslationSignal = $true
                 }
             }
         } catch {}
     }
 
-    # Detect supported translation language from actual language folders.
+    # A Toolkit metadata file is an explicit signal independent of About.xml naming.
+    if (Test-Path -LiteralPath (Join-Path $modPath "ModTranslationToolkit.json")) {
+        $info.ToolkitGenerated = $true
+    }
+
+    # Detect supported target language from the actual language folders.
     if (@(Get-LanguageRootsForCode $modPath "pl").Count -gt 0) {
         $info.TargetCode = "pl"
     } elseif (@(Get-LanguageRootsForCode $modPath "en").Count -gt 0) {
         $info.TargetCode = "en"
     }
+
+    $shape = Get-RimWorldTranslationContentShape $modPath
+    $info.TranslationOnlyContent = [bool]$shape.TranslationOnly
+    $info.LanguageFileCount = [int]$shape.LanguageFiles
+
     $pidLower = ([string]$info.PackageId).ToLowerInvariant()
     $nameLower = ([string]$info.Name).ToLowerInvariant()
+    $signals = New-Object System.Collections.ArrayList
+    $score = 0
 
-    # Be deliberately conservative. A normal mod may contain Languages,
-    # modDependencies and loadAfter entries. Those are NOT enough to call it
-    # a translation mod.
-    $explicitTranslationSignal = (
-        $pidLower -match '(^|[._-])(pltranslation|entranslation|polishtranslation|englishtranslation|translation)([._-]|$)' -or
-        $nameLower -match 'translation|tłumaczenie|tlumaczenie'
-    )
+    if (-not [string]::IsNullOrWhiteSpace($info.TargetCode) -and $info.LanguageFileCount -gt 0) {
+        $score += 10
+        [void]$signals.Add("language payload")
+    }
 
+    if ($info.ToolkitGenerated) {
+        $score += 100
+        [void]$signals.Add("toolkit metadata/attribution")
+    }
+
+    if ($pidLower -match '(^|[._-])(pltranslation|entranslation|polishtranslation|englishtranslation|translation)([._-]|$)') {
+        $score += 60
+        [void]$signals.Add("translation packageId")
+    }
+
+    if ($nameLower -match 'translation|tłumaczenie|tlumaczenie') {
+        $score += 60
+        [void]$signals.Add("translation name")
+    }
+
+    if ($info.DescriptionTranslationSignal) {
+        $score += 20
+        [void]$signals.Add("translation description")
+    }
+
+    if ($info.TranslationOnlyContent) {
+        $score += 35
+        [void]$signals.Add("language-only content")
+    }
+
+    # PackageId derived from a known installed original is a strong signal.
+    foreach ($candidatePackageId in @(Get-PackageIdSourceCandidates ([string]$info.PackageId))) {
+        if (Test-RimWorldTranslationReferenceResolves $candidatePackageId $modPath) {
+            $score += 40
+            $info.ReferencedOriginalPackageId = $candidatePackageId
+            [void]$signals.Add("packageId resolves original")
+            break
+        }
+    }
+
+    # Explicit dependency on another installed, non-framework mod is the most
+    # useful signal for custom-named translation packages.
+    foreach ($dependencyPackageId in @($info.Dependencies)) {
+        if (Test-RimWorldTranslationReferenceResolves $dependencyPackageId $modPath) {
+            $score += 35
+            if ([string]::IsNullOrWhiteSpace($info.ReferencedOriginalPackageId)) {
+                $info.ReferencedOriginalPackageId = [string]$dependencyPackageId
+            }
+            [void]$signals.Add("modDependency resolves original")
+            break
+        }
+    }
+
+    foreach ($loadAfterPackageId in @($info.LoadAfter)) {
+        if (Test-RimWorldTranslationReferenceResolves $loadAfterPackageId $modPath) {
+            $score += 20
+            if ([string]::IsNullOrWhiteSpace($info.ReferencedOriginalPackageId)) {
+                $info.ReferencedOriginalPackageId = [string]$loadAfterPackageId
+            }
+            [void]$signals.Add("loadAfter resolves original")
+            break
+        }
+    }
+
+    $info.ClassificationScore = $score
+    $info.ClassificationSignals = @($signals)
+
+    # Mandatory language payload prevents ordinary dependency/patch mods from
+    # being treated as translations. Score >= 60 requires at least two useful
+    # structural signals unless an explicit name/package/Toolkit signal exists.
     $info.IsTranslationMod = (
         -not [string]::IsNullOrWhiteSpace($info.TargetCode) -and
-        ($explicitTranslationSignal -or $info.ToolkitGenerated)
+        $info.LanguageFileCount -gt 0 -and
+        $score -ge 60
     )
 
     return [pscustomobject]$info
@@ -4400,23 +5481,19 @@ function Get-TranslationModInfo([string]$modPath) {
 
 
 function Get-TranslationClassificationReason($translationInfo, [string]$modPath) {
-    $pidLower = ([string]$translationInfo.PackageId).ToLowerInvariant()
-    $nameLower = ([string]$translationInfo.Name).ToLowerInvariant()
+    if ($null -eq $translationInfo) { return "unknown" }
 
-    if ($translationInfo.ToolkitGenerated) {
-        return "toolkit attribution"
+    $signals = @($translationInfo.ClassificationSignals)
+    $score = 0
+    try { $score = [int]$translationInfo.ClassificationScore } catch {}
+
+    if ($signals.Count -gt 0) {
+        return "score ${score}: " + ($signals -join ", ")
     }
 
-    if ($pidLower -match '(^|[._-])(pltranslation|entranslation|polishtranslation|englishtranslation|translation)([._-]|$)') {
-        return "packageId"
-    }
-
-    if ($nameLower -match 'translation|tłumaczenie|tlumaczenie') {
-        return "name"
-    }
-
-    return "normal mod"
+    return "score ${score}: no translation signals"
 }
+
 
 function Find-ModByPackageId([string]$packageId, [string]$excludePath = "") {
     if ([string]::IsNullOrWhiteSpace($packageId)) { return $null }
@@ -4622,7 +5699,8 @@ function Open-ExistingTranslationMod([string]$translationModPath) {
     Reset-TranslationUpdateMode
     $t = Get-TranslationModInfo $translationModPath
     if (-not $t.IsTranslationMod) {
-        throw "Wybrany mod nie został rozpoznany jako mod tłumaczeniowy."
+        $reason = Get-TranslationClassificationReason $t $translationModPath
+        throw "Wybrany mod nie został rozpoznany jako mod tłumaczeniowy. Klasyfikacja: $reason"
     }
 
     $resolved = Resolve-OriginalModForTranslation $t $translationModPath
@@ -7222,7 +8300,7 @@ function Apply-CreatorProfileToTranslator {
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Mod Translation Toolkit v0.10.9"
+        Title="Mod Translation Toolkit v0.10.15"
         Height="840" Width="1260"
         WindowStartupLocation="CenterScreen"
         Background="#121018"
@@ -7381,7 +8459,7 @@ function Apply-CreatorProfileToTranslator {
         <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
           <Button Name="btnApiSettings" Content="API / Tłumaczenie" Margin="0,0,8,0"/>
           <Border Background="#2B2038" CornerRadius="5" Padding="10,5" VerticalAlignment="Center">
-            <TextBlock Text="v0.10.9" Foreground="#CDA8F2" FontWeight="SemiBold"/>
+            <TextBlock Text="v0.10.15" Foreground="#CDA8F2" FontWeight="SemiBold"/>
           </Border>
         </StackPanel>
       </Grid>
@@ -7470,6 +8548,10 @@ function Apply-CreatorProfileToTranslator {
                          Foreground="#B9AEC9" VerticalAlignment="Center"/>
             </StackPanel>
             <StackPanel Grid.Column="1" Orientation="Horizontal" Margin="12,0,0,0">
+              <Button Name="btnTranslateRimWorldGameMissing" Content="Tłumacz brakujące" Margin="0,0,8,0"/>
+              <Button Name="btnRimWorldGameGlossary" Content="Glosariusz..." Margin="0,0,8,0"/>
+              <Button Name="btnRimWorldGameLearningMode" Content="Nauka: Ciche" Margin="0,0,8,0"/>
+              <Button Name="btnRimWorldGameLearningSuggestions" Content="Propozycje: 0" Margin="0,0,8,0"/>
               <Button Name="btnBuildRimWorldGameTranslation" Content="Zbuduj mod tłumaczeniowy" Margin="0,0,8,0"/>
               <Button Name="btnEditRimWorldGameWorkshopDescription" Content="Opis Workshop..." Margin="0,0,8,0"/>
               <Button Name="btnExportRimWorldGameCsv" Content="Eksport CSV" Margin="0,0,8,0"/>
@@ -7554,6 +8636,9 @@ function Apply-CreatorProfileToTranslator {
             <Button Name="btnBuild" Content="Zbuduj oddzielny mod"/>
             <Button Name="btnCopyWorkshop" Content="Kopiuj opis Workshop" IsEnabled="True"/>
               <Button Name="btnEditModWorkshopDescription" Content="Opis Workshop..." Margin="8,0,0,0"/>
+              <Button Name="btnRimWorldModGlossary" Content="Glosariusz..." Margin="8,0,0,0"/>
+              <Button Name="btnRimWorldModLearningMode" Content="Nauka: Ciche" Margin="8,0,0,0"/>
+              <Button Name="btnRimWorldModLearningSuggestions" Content="Propozycje: 0" Margin="8,0,0,0"/>
             <Label Name="lblCount" Content="Wpisy: 0" VerticalContentAlignment="Center"/>
           </WrapPanel>
 
@@ -7977,7 +9062,7 @@ $window = [Windows.Markup.XamlReader]::Load($reader)
 $names = @(
     "btnChooseMod","btnAnalyze","btnExport","btnImport","btnAutoTranslate","btnValidate","btnBuild",
     "txtModPath","txtModName","txtPackageId","txtAuthor","grid","lblCount","txtStatus",
-    "btnDetect","txtSearch","lblMods","modsGrid","btnUseSelected","btnOpenFolder","btnOpenCurrentFolder","cmbSourceLang","cmbTargetLang","lblSourceLang","lblTargetLang","tabTranslation","tabInstalledMods","tabGameProfiles","chkPreviewFlag","cmbPreviewFlag","btnCopyWorkshop","btnEditModWorkshopDescription","lblCoverageTitle","txtCoveragePL","txtCoverageEN","btnLoadExistingPL","btnLoadExistingEN","tabKenshi","btnDetectKenshi","btnChooseKenshi","txtKenshiPath","btnOpenKenshiFolder","btnScanKenshi","btnTranslateKenshi","btnExportKenshiCsv","btnImportKenshiCsv","btnFcsHelpKenshi","btnBuildKenshi","lblKenshiCount","kenshiGrid","txtKenshiStatus",
+    "btnDetect","txtSearch","lblMods","modsGrid","btnUseSelected","btnOpenFolder","btnOpenCurrentFolder","cmbSourceLang","cmbTargetLang","lblSourceLang","lblTargetLang","tabTranslation","tabInstalledMods","tabGameProfiles","chkPreviewFlag","cmbPreviewFlag","btnCopyWorkshop","btnEditModWorkshopDescription","btnRimWorldModGlossary","btnRimWorldModLearningMode","btnRimWorldModLearningSuggestions","lblCoverageTitle","txtCoveragePL","txtCoverageEN","btnLoadExistingPL","btnLoadExistingEN","tabKenshi","btnDetectKenshi","btnChooseKenshi","txtKenshiPath","btnOpenKenshiFolder","btnScanKenshi","btnTranslateKenshi","btnExportKenshiCsv","btnImportKenshiCsv","btnFcsHelpKenshi","btnBuildKenshi","lblKenshiCount","kenshiGrid","txtKenshiStatus",
   "btnUpdateExisting",
   "lblSearchTitle","txtSearchTerm","cmbSearchScope","btnClearSearch","lblReplaceTitle","txtReplaceTerm","btnReplaceAll","lblSearchCount",
   "tabWorkshop","txtCreatorName","txtSteamProfile","btnSaveCreatorProfile","txtWorkshopItemInput","btnAddWorkshopItem","btnRefreshWorkshop","btnRemoveWorkshopItem","btnOpenWorkshopItem","lblWorkshopItems","lblWorkshopSubscriptions","lblWorkshopFavorites","lblWorkshopViews","workshopGrid","txtWorkshopStatus",
@@ -7996,6 +9081,7 @@ $names = @(
   "btnRwGameCoreOnly",
   "btnRwGameDlcOnly",
   "btnScanRimWorldGame",
+  "btnTranslateRimWorldGameMissing","btnRimWorldGameGlossary","btnRimWorldGameLearningMode","btnRimWorldGameLearningSuggestions",
   "btnBuildRimWorldGameTranslation",
   "btnEditRimWorldGameWorkshopDescription",
   "btnExportRimWorldGameCsv",
@@ -8070,6 +9156,44 @@ foreach ($n in $names) { Set-Variable -Name $n -Value $window.FindName($n) }
 Load-WorkshopProfile
 Apply-CreatorProfileToTranslator
 Apply-CentralUiLanguage
+
+Update-RimWorldLearningUi
+
+# Learn from manual corrections made after an automatic translation.
+$grid.Add_CellEditEnding({
+    param($sender,$e)
+    try {
+        if ($null -eq $e.Row -or $null -eq $e.Row.Item) { return }
+        if ($null -eq $e.Column -or [int]$e.Column.DisplayIndex -ne 4) { return }
+
+        $newValue = ""
+        if ($e.EditingElement -is [System.Windows.Controls.TextBox]) {
+            $newValue = [string]$e.EditingElement.Text
+        } else {
+            $newValue = [string]$e.Row.Item.Translation
+        }
+
+        Handle-RimWorldManualTranslationEdit $e.Row.Item "Mod" $newValue
+    } catch {}
+})
+
+$rimWorldGameGrid.Add_CellEditEnding({
+    param($sender,$e)
+    try {
+        if ($null -eq $e.Row -or $null -eq $e.Row.Item) { return }
+        if ($null -eq $e.Column -or [int]$e.Column.DisplayIndex -ne 4) { return }
+
+        $newValue = ""
+        if ($e.EditingElement -is [System.Windows.Controls.TextBox]) {
+            $newValue = [string]$e.EditingElement.Text
+        } else {
+            $newValue = [string]$e.Row.Item.Translation
+        }
+
+        Handle-RimWorldManualTranslationEdit $e.Row.Item "Game" $newValue
+    } catch {}
+})
+
 
 
 
@@ -9653,7 +10777,10 @@ $btnAutoTranslate.Add_Click({
     $failed = 0
 
     foreach ($e in $todo) {
-        try { $e.Translation = Translate-Configured $e.Source $src $dst } catch { $failed++ }
+        try {
+            $e.Translation = Translate-RimWorldEntryWithGlossary $e "Mod" $src $dst
+            Set-RimWorldLearningBaseline $e "Mod" ([string]$e.Translation)
+        } catch { $failed++ }
         $done++
             if (($done % 25) -eq 0) { [void](Save-ToolkitTranslationCheckpoint "auto-translate-$done") }
 
@@ -9677,6 +10804,21 @@ $btnAutoTranslate.Add_Click({
 })
 
 
+
+
+$btnRimWorldModLearningMode.Add_Click({
+    [void](Cycle-RimWorldLearningMode)
+})
+
+$btnRimWorldModLearningSuggestions.Add_Click({
+    try { Show-RimWorldLearningSuggestionReview "Mod" }
+    catch { [System.Windows.MessageBox]::Show($_.Exception.Message,"RimWorld learning") | Out-Null }
+})
+
+$btnRimWorldModGlossary.Add_Click({
+    try { Show-RimWorldGlossaryEditor "Mod" }
+    catch { [System.Windows.MessageBox]::Show($_.Exception.Message,"RimWorld glossary") | Out-Null }
+})
 
 $btnEditModWorkshopDescription.Add_Click({
     try {
@@ -10776,7 +11918,7 @@ function Build-RimWorldGameTranslationMod([string]$parentFolder) {
   <name>$([System.Security.SecurityElement]::Escape($displayName))</name>
   <author>$([System.Security.SecurityElement]::Escape([string]$txtAuthor.Text))</author>
   <packageId>$packageId</packageId>
-  <modVersion>0.10.9</modVersion>
+  <modVersion>0.10.15</modVersion>
   <supportedVersions>
     <li>$version</li>
   </supportedVersions>
@@ -11181,6 +12323,79 @@ $btnEditRimWorldGameWorkshopDescription.Add_Click({
     }
 })
 
+
+$btnRimWorldGameLearningMode.Add_Click({
+    [void](Cycle-RimWorldLearningMode)
+})
+
+$btnRimWorldGameLearningSuggestions.Add_Click({
+    try { Show-RimWorldLearningSuggestionReview "Game" }
+    catch { [System.Windows.MessageBox]::Show($_.Exception.Message,"RimWorld learning") | Out-Null }
+})
+
+$btnRimWorldGameGlossary.Add_Click({
+    try { Show-RimWorldGlossaryEditor "Game" }
+    catch { [System.Windows.MessageBox]::Show($_.Exception.Message,"RimWorld glossary") | Out-Null }
+})
+
+$btnTranslateRimWorldGameMissing.Add_Click({
+    if (-not (Test-TranslationProviderConfigured)) {
+        Show-MissingTranslationProviderMessage
+        return
+    }
+
+    if (@($script:RimWorldGameEntries).Count -eq 0) {
+        [System.Windows.MessageBox]::Show("Najpierw zeskanuj Core lub DLC.","RimWorld Game") | Out-Null
+        return
+    }
+
+    $sourceLang = Get-RimWorldGameSelectedSourceLanguage
+    $targetLang = Get-RimWorldGameSelectedTargetLanguage
+    if ($null -eq $sourceLang -or $null -eq $targetLang) { return }
+
+    $src = [string]$sourceLang.Code
+    $dst = [string]$targetLang.Code
+
+    $pair = Require-TranslationLanguagePair $src $dst
+    if ($null -eq $pair) { return }
+
+    $todo = @($script:RimWorldGameEntries | Where-Object {
+        [string]::IsNullOrWhiteSpace([string]$_.Translation)
+    })
+    if ($todo.Count -eq 0) {
+        Set-ControlTextSafe $txtRimWorldGameStatus "Brak pustych wpisów do tłumaczenia."
+        return
+    }
+
+    $answer = [System.Windows.MessageBox]::Show(
+        "Automatyczne tłumaczenie obejmie $($todo.Count) pustych wpisów Core/DLC. Glosariusz kontekstowy zostanie zastosowany automatycznie.`n`nKontynuować?",
+        "RimWorld Game",
+        [System.Windows.MessageBoxButton]::YesNo
+    )
+    if ($answer -ne [System.Windows.MessageBoxResult]::Yes) { return }
+
+    $done = 0
+    $failed = 0
+    foreach ($e in $todo) {
+        try {
+            $e.Translation = Translate-RimWorldEntryWithGlossary $e "Game" $src $dst
+            Set-RimWorldLearningBaseline $e "Game" ([string]$e.Translation)
+        } catch {
+            $failed++
+        }
+
+        $done++
+        if (($done % 5) -eq 0 -or $done -eq $todo.Count) {
+            Set-ControlTextSafe $txtRimWorldGameStatus "Tłumaczenie Core/DLC: $done / $($todo.Count) | błędy: $failed"
+            [System.Windows.Forms.Application]::DoEvents()
+        }
+        Start-Sleep -Milliseconds 120
+    }
+
+    Apply-RimWorldGameFilter
+    Set-ControlTextSafe $txtRimWorldGameStatus "Tłumaczenie Core/DLC zakończone. Błędy: $failed."
+})
+
 $btnBuildRimWorldGameTranslation.Add_Click({
     try {
         Commit-RimWorldGameGridEdits
@@ -11296,9 +12511,9 @@ $btnUseSelected.Add_Click({
             $tabRimWorldModInner.SelectedItem = $tabTranslation
             Refresh-LanguageCoverageUi
             $txtStatus.Text = if ($script:UiLanguage -eq "en") {
-                "Editing: $($translationInfo.Name). Loaded $($edit.Loaded)/$($edit.Total) existing entries. Original: $($edit.Original.Name). Resolved via: $($edit.ResolveMethod)."
+                "Editing: $($translationInfo.Name). Loaded $($edit.Loaded)/$($edit.Total) existing entries. Original: $($edit.Original.Name). Resolved via: $($edit.ResolveMethod). Classification: $(Get-TranslationClassificationReason $translationInfo ([string]$m.Path))."
             } else {
-                "Edycja: $($translationInfo.Name). Wczytano $($edit.Loaded)/$($edit.Total) istniejących wpisów. Oryginał: $($edit.Original.Name). Wykrycie źródła: $($edit.ResolveMethod)."
+                "Edycja: $($translationInfo.Name). Wczytano $($edit.Loaded)/$($edit.Total) istniejących wpisów. Oryginał: $($edit.Original.Name). Wykrycie źródła: $($edit.ResolveMethod). Klasyfikacja: $(Get-TranslationClassificationReason $translationInfo ([string]$m.Path))."
             }
         } else {
             $script:EditingTranslationModPath = ""
