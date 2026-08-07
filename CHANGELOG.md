@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.10.16 Experimental - 2026-08-07
+
+### Existing translation update detection fix
+- Fixed `Aktualizuj istniejące tłumaczenie` rejecting valid custom-named translation mods.
+- The update workflow now validates the translation directly against the source-mod folder explicitly selected by the user.
+- `modDependencies`, `loadAfter`, `loadBefore`, and packageId-derived references can confirm the selected original even when it is not present in the previously scanned installed-mod list.
+- A real language payload is still required, so the stronger detection does not turn arbitrary dependency mods into translation mods.
+- Added support for language-prefix packageIds such as `pl.Aoba.Exosuit.Framework -> Aoba.Exosuit.Framework`.
+- Improved rejection diagnostics now include the classification score/signals.
+- Verified specifically against the structure used by `Exosuit Framework [PL]`.
+
 ## 0.10.15 Experimental - 2026-08-07
 
 ### Quiet glossary learning

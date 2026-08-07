@@ -7,7 +7,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-$AppVersion = "0.10.15"
+$AppVersion = "0.10.16"
 $script:UiLanguage = "pl"
 $script:Entries = New-Object System.Collections.ArrayList
 $script:Mods = New-Object System.Collections.ArrayList
@@ -5311,6 +5311,81 @@ function Test-RimWorldTranslationReferenceResolves([string]$packageId, [string]$
     }
 }
 
+
+function Test-TranslationReferencesExpectedOriginal($translationInfo, [string]$expectedOriginalPackageId) {
+    if ($null -eq $translationInfo) { return $false }
+    if ([string]::IsNullOrWhiteSpace($expectedOriginalPackageId)) { return $false }
+
+    $expected = $expectedOriginalPackageId.Trim().ToLowerInvariant()
+
+    foreach ($p in @($translationInfo.Dependencies)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$p) -and
+            ([string]$p).Trim().ToLowerInvariant() -eq $expected) {
+            return $true
+        }
+    }
+
+    foreach ($p in @($translationInfo.LoadAfter)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$p) -and
+            ([string]$p).Trim().ToLowerInvariant() -eq $expected) {
+            return $true
+        }
+    }
+
+    foreach ($p in @($translationInfo.LoadBefore)) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$p) -and
+            ([string]$p).Trim().ToLowerInvariant() -eq $expected) {
+            return $true
+        }
+    }
+
+    foreach ($candidate in @(Get-PackageIdSourceCandidates ([string]$translationInfo.PackageId))) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$candidate) -and
+            ([string]$candidate).Trim().ToLowerInvariant() -eq $expected) {
+            return $true
+        }
+    }
+
+    return $false
+}
+
+function Confirm-TranslationAgainstSelectedOriginal($translationInfo, [string]$originalModPath) {
+    if ($null -eq $translationInfo) { return $translationInfo }
+    if ([string]::IsNullOrWhiteSpace($originalModPath) -or
+        -not (Test-Path -LiteralPath $originalModPath -PathType Container)) {
+        return $translationInfo
+    }
+
+    $original = Get-AboutInfo $originalModPath
+    $expectedPackageId = [string]$original.PackageId
+    if ([string]::IsNullOrWhiteSpace($expectedPackageId)) { return $translationInfo }
+
+    if (-not (Test-TranslationReferencesExpectedOriginal $translationInfo $expectedPackageId)) {
+        return $translationInfo
+    }
+
+    # A selected source folder plus a direct dependency/load-order/packageId
+    # reference is a stronger signal than relying on the global installed-mod scan.
+    if (-not [string]::IsNullOrWhiteSpace([string]$translationInfo.TargetCode) -and
+        [int]$translationInfo.LanguageFileCount -gt 0) {
+
+        $translationInfo.IsTranslationMod = $true
+        if ([int]$translationInfo.ClassificationScore -lt 80) {
+            $translationInfo.ClassificationScore = 80
+        }
+
+        $signals = New-Object System.Collections.ArrayList
+        foreach ($s in @($translationInfo.ClassificationSignals)) { [void]$signals.Add([string]$s) }
+        if (-not (@($signals) -contains "references selected original")) {
+            [void]$signals.Add("references selected original")
+        }
+        $translationInfo.ClassificationSignals = @($signals)
+        $translationInfo.ReferencedOriginalPackageId = $expectedPackageId
+    }
+
+    return $translationInfo
+}
+
 function Get-TranslationModInfo([string]$modPath) {
     $info = [ordered]@{
         Name = Split-Path $modPath -Leaf
@@ -5577,6 +5652,17 @@ function Get-PackageIdSourceCandidates([string]$packageId) {
         $candidate = [regex]::Replace($basePackageId, $p, '', [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
         if ($candidate -ne $basePackageId -and -not [string]::IsNullOrWhiteSpace($candidate)) {
             if (-not (@($result) -contains $candidate)) {
+                [void]$result.Add($candidate)
+            }
+        }
+    }
+
+    # Common community convention: prefix the original packageId with language.
+    # Example: pl.Aoba.Exosuit.Framework -> Aoba.Exosuit.Framework
+    foreach ($prefix in @('pl.','en.','de.','fr.','es.','it.','ru.','pt.','br.','cz.','uk.','ua.','jp.','kr.','cn.','tw.')) {
+        if ($basePackageId.StartsWith($prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $candidate = $basePackageId.Substring($prefix.Length)
+            if (-not [string]::IsNullOrWhiteSpace($candidate) -and -not (@($result) -contains $candidate)) {
                 [void]$result.Add($candidate)
             }
         }
@@ -5892,7 +5978,11 @@ function Start-TranslationUpdate([string]$updatedOriginalPath, [string]$translat
     if (-not (Test-ExistingFolderSafe $translationModPath)) { throw "Nie znaleziono istniejącego moda tłumaczeniowego." }
 
     $translationInfo = Get-TranslationModInfo $translationModPath
-    if (-not $translationInfo.IsTranslationMod) { throw "Wybrany folder nie wygląda na mod tłumaczeniowy." }
+    $translationInfo = Confirm-TranslationAgainstSelectedOriginal $translationInfo $updatedOriginalPath
+    if (-not $translationInfo.IsTranslationMod) {
+        $reason = Get-TranslationClassificationReason $translationInfo $translationModPath
+        throw "Wybrany folder nie wygląda na mod tłumaczeniowy. Klasyfikacja: $reason"
+    }
 
     $targetCode = [string]$translationInfo.TargetCode
     if ([string]::IsNullOrWhiteSpace($targetCode)) { throw "Nie wykryto języka istniejącego tłumaczenia." }
@@ -8300,7 +8390,7 @@ function Apply-CreatorProfileToTranslator {
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Mod Translation Toolkit v0.10.15"
+        Title="Mod Translation Toolkit v0.10.16"
         Height="840" Width="1260"
         WindowStartupLocation="CenterScreen"
         Background="#121018"
@@ -8459,7 +8549,7 @@ function Apply-CreatorProfileToTranslator {
         <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
           <Button Name="btnApiSettings" Content="API / Tłumaczenie" Margin="0,0,8,0"/>
           <Border Background="#2B2038" CornerRadius="5" Padding="10,5" VerticalAlignment="Center">
-            <TextBlock Text="v0.10.15" Foreground="#CDA8F2" FontWeight="SemiBold"/>
+            <TextBlock Text="v0.10.16" Foreground="#CDA8F2" FontWeight="SemiBold"/>
           </Border>
         </StackPanel>
       </Grid>
@@ -11918,7 +12008,7 @@ function Build-RimWorldGameTranslationMod([string]$parentFolder) {
   <name>$([System.Security.SecurityElement]::Escape($displayName))</name>
   <author>$([System.Security.SecurityElement]::Escape([string]$txtAuthor.Text))</author>
   <packageId>$packageId</packageId>
-  <modVersion>0.10.15</modVersion>
+  <modVersion>0.10.16</modVersion>
   <supportedVersions>
     <li>$version</li>
   </supportedVersions>
