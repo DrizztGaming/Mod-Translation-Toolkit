@@ -1,4 +1,13 @@
-# Changelog
+﻿# Changelog
+
+## v0.10.21
+
+- Improved RimWorld translation coverage reporting: translated / identical to source / missing.
+- Clarified source localization status when English text comes directly from Defs.
+- Added loading an external target translation from a separate folder/mod.
+- Added a multiline translation editor that renders RimWorld `\n` markers as real line breaks while editing.
+- Renamed target translation reload controls for clearer UX.
+- Updated application/version metadata to v0.10.21.
 
 ## v0.10.20
 - Dodano centralny overlay podczas skanowania moda, aby aplikacja nie wyglądała na zawieszoną.

@@ -1,4 +1,4 @@
-# Mod Translation Toolkit — instrukcja PL
+﻿# Mod Translation Toolkit — instrukcja PL
 
 ## Uruchomienie
 Uruchom plik `Mod Translation Toolkit.vbs`. Toolkit nie wymaga Pythona i nie powinien otwierać widocznego okna PowerShell/CMD.
@@ -171,3 +171,17 @@ Nowe pole **Creator ID** jest zapisywane lokalnie. `packageId` ma format:
 `<oryginalny.packageId>.<creatorId>.<język>`
 
 Eksport CSV zawiera `SourceLanguage` i `TargetLanguage`.
+
+## Nowości v0.10.21: stan tłumaczenia i teksty wieloliniowe
+
+W profilu **RimWorld Mod** stan języka docelowego rozróżnia teraz:
+
+- wpisy faktycznie przetłumaczone,
+- wpisy identyczne z tekstem źródłowym,
+- wpisy brakujące/puste.
+
+Jeżeli mod nie posiada osobnego `Languages/English`, program wyjaśnia, że tekst źródłowy pochodzi bezpośrednio z `Defs`.
+
+Przycisk **Wczytaj z folderu...** pozwala wskazać osobny mod tłumaczenia, folder `Languages` albo bezpośrednio folder języka, np. `Polish`. Przydaje się to przy aktualizowaniu starszych tłumaczeń RimTrans, które nie są częścią moda źródłowego.
+
+Przycisk **Edytuj wieloliniowo...** otwiera zaznaczony wpis w edytorze, który pokazuje znaczniki RimWorld `\n` jako normalne podziały wierszy. Po zapisaniu program zamienia je z powrotem na bezpieczną postać `\n`. Automatyczne tłumaczenie chroni te znaczniki tak samo jak placeholdery.

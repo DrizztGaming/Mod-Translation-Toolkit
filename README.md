@@ -1,4 +1,7 @@
-# Mod Translation Toolkit
+﻿# Mod Translation Toolkit
+
+> **v0.10.21:** clearer translation coverage, external translation-folder import, and a multiline RimWorld text editor.
+
 
 A Windows desktop helper for translating game mods.
 

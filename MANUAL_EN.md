@@ -1,4 +1,4 @@
-# Mod Translation Toolkit — English manual
+﻿# Mod Translation Toolkit — English manual
 
 ## Launch
 Run `Mod Translation Toolkit.vbs`. The Toolkit does not require Python and should not show a visible PowerShell/CMD window.
@@ -171,3 +171,17 @@ The new persistent **Creator ID** is used in package IDs:
 `<original.packageId>.<creatorId>.<language>`
 
 CSV exports include `SourceLanguage` and `TargetLanguage`.
+
+## v0.10.21: translation status and multiline text
+
+In the **RimWorld Mod** profile, target-language coverage now distinguishes:
+
+- actually translated entries,
+- entries identical to the source text,
+- missing/empty entries.
+
+If a mod has no separate `Languages/English` folder, the Toolkit explains that source text is being read directly from `Defs`.
+
+**Load from folder...** can import an existing translation from a separate translation mod, a `Languages` folder, or the target-language folder itself, e.g. `Polish`. This is useful when updating older RimTrans/community translations that are not bundled with the source mod.
+
+**Edit multiline...** opens the selected entry in an editor where RimWorld `\n` markers are displayed as normal line breaks. Saving converts them back to safe `\n` markers. Automatic translation protects these line-break markers together with normal placeholders.

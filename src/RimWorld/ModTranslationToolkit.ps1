@@ -7,7 +7,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-$AppVersion = "0.10.20"
+$AppVersion = "0.10.21"
 $script:UiLanguage = "pl"
 $script:Entries = New-Object System.Collections.ArrayList
 $script:Mods = New-Object System.Collections.ArrayList
@@ -4444,37 +4444,214 @@ function Read-LanguageEntries([string]$modPath, [string]$code) {
     return $entries
 }
 
+function Test-RimWorldSourceCopy([string]$source,[string]$translation) {
+    if ([string]::IsNullOrWhiteSpace($translation)) { return $false }
+    $a = ([string]$source).Replace("`r`n","`n").Trim()
+    $b = ([string]$translation).Replace("`r`n","`n").Trim()
+    return ($a -ceq $b)
+}
+
+function Get-RimWorldCoverageStats($languageEntries) {
+    $total = $script:Entries.Count
+    $matched = 0
+    $translated = 0
+    $identical = 0
+    $empty = 0
+
+    foreach ($e in $script:Entries) {
+        $oldEntry = Find-RimWorldExistingLanguageEntry $languageEntries $e
+        if ($null -eq $oldEntry) {
+            $empty++
+            continue
+        }
+
+        $matched++
+        $text = [string]$oldEntry.Text
+        if ([string]::IsNullOrWhiteSpace($text)) {
+            $empty++
+        } elseif (Test-RimWorldSourceCopy ([string]$e.Source) $text) {
+            $identical++
+        } else {
+            $translated++
+        }
+    }
+
+    $percent = if ($total -gt 0) { [Math]::Round(($translated * 100.0) / $total, 1) } else { 0 }
+    $status = if ($translated -eq 0) { "none" } elseif (($translated + $identical) -lt $total -or $identical -gt 0) { "partial" } else { "complete" }
+
+    return [pscustomobject]@{
+        Found = if ($null -eq $languageEntries) { 0 } else { $languageEntries.Count }
+        Matched = $matched
+        Translated = $translated
+        Identical = $identical
+        Missing = $empty
+        Total = $total
+        Percent = $percent
+        Status = $status
+    }
+}
+
 function Update-LanguageCoverage([string]$modPath) {
     $script:LanguageCoverage = @{}
     $script:ExistingTranslations = @{}
 
-    $sourceCount = $script:Entries.Count
     foreach ($lang in $script:Languages) {
         $code = [string]$lang.Code
         $entries = Read-LanguageEntries $modPath $code
         $script:ExistingTranslations[$code] = $entries
-
-        $matched = 0
-        foreach ($e in $script:Entries) {
-            $oldEntry = Find-RimWorldExistingLanguageEntry $entries $e
-            if ($null -ne $oldEntry) { $matched++ }
-        }
-
-        $percent = if ($sourceCount -gt 0) { [Math]::Round(($matched * 100.0) / $sourceCount, 1) } else { 0 }
-        $status = if ($matched -eq 0) { "none" } elseif ($matched -lt $sourceCount) { "partial" } else { "complete" }
-
-        $script:LanguageCoverage[$code] = [pscustomobject]@{
-            Found = $entries.Count
-            Matched = $matched
-            Total = $sourceCount
-            Percent = $percent
-            Status = $status
-        }
+        $script:LanguageCoverage[$code] = Get-RimWorldCoverageStats $entries
     }
 }
 
 
 
+
+function Read-LanguageEntriesFromRoot([string]$langRoot) {
+    $entries = @{}
+    if (-not (Test-ExistingFolderSafe $langRoot)) { return $entries }
+
+    Get-ChildItem -LiteralPath $langRoot -Recurse -Filter *.xml -File -ErrorAction SilentlyContinue | ForEach-Object {
+        $file = $_
+        try {
+            [xml]$doc = Get-Content -LiteralPath $file.FullName -Raw -Encoding UTF8
+            if ($null -eq $doc.DocumentElement -or $doc.DocumentElement.Name -ne "LanguageData") { return }
+            $rel = $file.FullName.Substring($langRoot.Length).TrimStart('\','/')
+            foreach ($child in $doc.DocumentElement.ChildNodes) {
+                if ($child.NodeType -ne [System.Xml.XmlNodeType]::Element) { continue }
+                $id = "$rel|$($child.Name)".ToLowerInvariant()
+                if (-not $entries.ContainsKey($id)) {
+                    $entries[$id] = [pscustomobject]@{ File=$rel; Key=$child.Name; Text=(Get-TextContent $child) }
+                }
+            }
+        } catch {}
+    }
+    return $entries
+}
+
+function Read-ExternalTargetTranslation([string]$pickedPath,[string]$code) {
+    if (-not (Test-ExistingFolderSafe $pickedPath)) { return @{} }
+    $folderName = Get-LanguageFolderName $code
+
+    $candidate = Join-Path $pickedPath "Languages\$folderName"
+    if (Test-ExistingFolderSafe $candidate) { return Read-LanguageEntriesFromRoot $candidate }
+
+    $candidate = Join-Path $pickedPath $folderName
+    if ((Split-Path $pickedPath -Leaf) -ieq "Languages" -and (Test-ExistingFolderSafe $candidate)) {
+        return Read-LanguageEntriesFromRoot $candidate
+    }
+
+    if ((Split-Path $pickedPath -Leaf) -ieq $folderName -or
+        (Test-Path (Join-Path $pickedPath "DefInjected")) -or
+        (Test-Path (Join-Path $pickedPath "Keyed"))) {
+        return Read-LanguageEntriesFromRoot $pickedPath
+    }
+
+    return @{}
+}
+
+function Apply-TranslationEntries($entries) {
+    $loaded = 0
+    $identical = 0
+    $translated = 0
+
+    foreach ($e in $script:Entries) {
+        $oldEntry = Find-RimWorldExistingLanguageEntry $entries $e
+        if ($null -eq $oldEntry) { continue }
+        $text = [string]$oldEntry.Text
+        if ([string]::IsNullOrWhiteSpace($text)) { continue }
+        $e.Translation = $text
+        $loaded++
+        if (Test-RimWorldSourceCopy ([string]$e.Source) $text) { $identical++ } else { $translated++ }
+    }
+
+    Refresh-Grid
+    return [pscustomobject]@{ Loaded=$loaded; Identical=$identical; Translated=$translated }
+}
+
+function Convert-RimWorldEscapesToEditor([string]$text) {
+    if ($null -eq $text) { return "" }
+    return ([string]$text).Replace('\r\n',"`r`n").Replace('\n',"`r`n")
+}
+
+function Convert-EditorToRimWorldEscapes([string]$text) {
+    if ($null -eq $text) { return "" }
+    $t = ([string]$text).Replace("`r`n","`n").Replace("`r","`n")
+    return $t.Replace("`n",'\n')
+}
+
+function Show-RimWorldMultilineEditor($entry) {
+    if ($null -eq $entry) { return }
+    $editor = New-Object System.Windows.Window
+    $editor.Title = if ($script:UiLanguage -eq "en") { "Multiline translation editor" } else { "Edytor tekstu wieloliniowego" }
+    $editor.Width = 900
+    $editor.Height = 620
+    $editor.WindowStartupLocation = "CenterOwner"
+    $editor.Owner = $window
+    $editor.Background = [System.Windows.Media.Brushes]::White
+
+    $gridEdit = New-Object System.Windows.Controls.Grid
+    $gridEdit.Margin = '12'
+    [void]$gridEdit.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{Height='Auto'}))
+    [void]$gridEdit.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{Height='*'}))
+    [void]$gridEdit.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{Height='Auto'}))
+    [void]$gridEdit.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{Height='*'}))
+    [void]$gridEdit.RowDefinitions.Add((New-Object System.Windows.Controls.RowDefinition -Property @{Height='Auto'}))
+
+    $lblSrc = New-Object System.Windows.Controls.TextBlock
+    $lblSrc.Text = if ($script:UiLanguage -eq "en") { "Source (line breaks shown normally):" } else { "Oryginał (podziały linii pokazane normalnie):" }
+    $lblSrc.Margin='0,0,0,6'
+    [System.Windows.Controls.Grid]::SetRow($lblSrc,0)
+    $gridEdit.Children.Add($lblSrc) | Out-Null
+
+    $srcBox = New-Object System.Windows.Controls.TextBox
+    $srcBox.Text = Convert-RimWorldEscapesToEditor ([string]$entry.Source)
+    $srcBox.IsReadOnly = $true
+    $srcBox.AcceptsReturn = $true
+    $srcBox.TextWrapping = 'Wrap'
+    $srcBox.VerticalScrollBarVisibility = 'Auto'
+    [System.Windows.Controls.Grid]::SetRow($srcBox,1)
+    $gridEdit.Children.Add($srcBox) | Out-Null
+
+    $lblDst = New-Object System.Windows.Controls.TextBlock
+    $lblDst.Text = if ($script:UiLanguage -eq "en") { "Translation:" } else { "Tłumaczenie:" }
+    $lblDst.Margin='0,10,0,6'
+    [System.Windows.Controls.Grid]::SetRow($lblDst,2)
+    $gridEdit.Children.Add($lblDst) | Out-Null
+
+    $dstBox = New-Object System.Windows.Controls.TextBox
+    $dstBox.Text = Convert-RimWorldEscapesToEditor ([string]$entry.Translation)
+    $dstBox.AcceptsReturn = $true
+    $dstBox.TextWrapping = 'Wrap'
+    $dstBox.VerticalScrollBarVisibility = 'Auto'
+    [System.Windows.Controls.Grid]::SetRow($dstBox,3)
+    $gridEdit.Children.Add($dstBox) | Out-Null
+
+    $buttons = New-Object System.Windows.Controls.StackPanel
+    $buttons.Orientation='Horizontal'
+    $buttons.HorizontalAlignment='Right'
+    $buttons.Margin='0,10,0,0'
+    $save = New-Object System.Windows.Controls.Button
+    $save.Content = if ($script:UiLanguage -eq "en") { "Save" } else { "Zapisz" }
+    $save.MinWidth=90
+    $cancel = New-Object System.Windows.Controls.Button
+    $cancel.Content = if ($script:UiLanguage -eq "en") { "Cancel" } else { "Anuluj" }
+    $cancel.MinWidth=90
+    $cancel.Margin='8,0,0,0'
+    $buttons.Children.Add($save)|Out-Null
+    $buttons.Children.Add($cancel)|Out-Null
+    [System.Windows.Controls.Grid]::SetRow($buttons,4)
+    $gridEdit.Children.Add($buttons)|Out-Null
+
+    $save.Add_Click({
+        $entry.Translation = Convert-EditorToRimWorldEscapes ([string]$dstBox.Text)
+        $editor.DialogResult = $true
+        $editor.Close()
+    })
+    $cancel.Add_Click({ $editor.DialogResult=$false; $editor.Close() })
+    $editor.Content=$gridEdit
+    [void]$editor.ShowDialog()
+    Refresh-Grid
+}
 
 function AutoLoad-ExistingTargetTranslation {
     $code = Get-SelectedTargetLanguageCode
@@ -4508,21 +4685,8 @@ function AutoLoad-ExistingTargetTranslation {
 }
 
 function Apply-ExistingTranslation([string]$code) {
-    if (-not $script:ExistingTranslations.ContainsKey($code)) { return 0 }
-
-    $entries = $script:ExistingTranslations[$code]
-    $loaded = 0
-
-    foreach ($e in $script:Entries) {
-        $oldEntry = Find-RimWorldExistingLanguageEntry $entries $e
-        if ($null -ne $oldEntry) {
-            $e.Translation = [string]$oldEntry.Text
-            $loaded++
-        }
-    }
-
-    Refresh-Grid
-    return $loaded
+    if (-not $script:ExistingTranslations.ContainsKey($code)) { return [pscustomobject]@{Loaded=0;Identical=0;Translated=0} }
+    return Apply-TranslationEntries $script:ExistingTranslations[$code]
 }
 
 function Scan-EnglishLanguages([string]$modPath) {
@@ -8564,7 +8728,7 @@ function Apply-CreatorProfileToTranslator {
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Mod Translation Toolkit v0.10.20"
+        Title="Mod Translation Toolkit v0.10.21"
         Height="840" Width="1260"
         WindowStartupLocation="CenterScreen"
         Background="#121018"
@@ -8723,7 +8887,7 @@ function Apply-CreatorProfileToTranslator {
         <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
           <Button Name="btnApiSettings" Content="API / Tłumaczenie" Margin="0,0,8,0"/>
           <Border Background="#2B2038" CornerRadius="5" Padding="10,5" VerticalAlignment="Center">
-            <TextBlock Text="v0.10.20" Foreground="#CDA8F2" FontWeight="SemiBold"/>
+            <TextBlock Text="v0.10.21" Foreground="#CDA8F2" FontWeight="SemiBold"/>
           </Border>
         </StackPanel>
       </Grid>
@@ -8910,16 +9074,19 @@ function Apply-CreatorProfileToTranslator {
           <Border Grid.Row="3" Background="#19151F" BorderBrush="#40344F" BorderThickness="1"
                   CornerRadius="4" Padding="8" Margin="0,0,0,10">
             <StackPanel>
-              <StackPanel Orientation="Horizontal">
-                <TextBlock Name="lblCoverageTitle" Text="Istniejące języki:" VerticalAlignment="Center"
-                           Foreground="#B9AEC9" Margin="0,0,10,0"/>
+              <TextBlock Name="lblCoverageTitle" Text="Stan lokalizacji:" VerticalAlignment="Center"
+                         Foreground="#B9AEC9" Margin="0,0,0,6"/>
+              <WrapPanel>
                 <TextBlock Name="txtCoveragePL" Text="Polski: -" VerticalAlignment="Center"
                            Foreground="#D4B5F5" Margin="0,0,12,0"/>
-                <Button Name="btnLoadExistingPL" Content="Wczytaj ponownie PL" IsEnabled="False"/>
+                <Button Name="btnLoadExistingPL" Content="Odśwież tłumaczenie PL" IsEnabled="False"/>
+                <Button Name="btnLoadExternalPL" Content="Wczytaj z folderu..." Margin="6,0,0,0"/>
+              </WrapPanel>
+              <WrapPanel Margin="0,6,0,0">
                 <TextBlock Name="txtCoverageEN" Text="English: -" VerticalAlignment="Center"
-                           Foreground="#D4B5F5" Margin="8,0,12,0"/>
+                           Foreground="#D4B5F5" Margin="0,0,12,0"/>
                 <Button Name="btnLoadExistingEN" Content="Wczytaj ponownie EN" IsEnabled="False"/>
-              </StackPanel>
+              </WrapPanel>
               <StackPanel Orientation="Horizontal" Margin="0,8,0,0">
                 <TextBlock Name="lblCreatorId" Text="Creator ID:" VerticalAlignment="Center" Margin="0,0,6,0"/>
                 <TextBox Name="txtCreatorId" Width="160" ToolTip="Stały identyfikator autora używany w packageId tłumaczeń."/>
@@ -8943,6 +9110,8 @@ function Apply-CreatorProfileToTranslator {
               <TextBlock Name="lblReplaceTitle" Text="Nowy tekst:" VerticalAlignment="Center" Margin="0,0,6,0"/>
               <TextBox Name="txtReplaceTerm" Width="230" Margin="0,0,8,0"/>
               <Button Name="btnReplaceAll" Content="Zamień wszędzie"/>
+              <Button Name="btnEditMultiline" Content="Edytuj wieloliniowo..." Margin="8,0,0,0"
+                      ToolTip="Edytuj tekst z \n jako normalne akapity i podziały linii."/>
               <Label Name="lblSearchCount" Content="" VerticalContentAlignment="Center" Margin="8,0,0,0"/>
             </WrapPanel>
           </Border>
@@ -9344,7 +9513,7 @@ $window = [Windows.Markup.XamlReader]::Load($reader)
 $names = @(
     "btnChooseMod","btnAnalyze","btnExport","btnImport","btnAutoTranslate","btnValidate","btnBuild",
     "txtModPath","txtModName","txtPackageId","txtAuthor","grid","lblCount","txtStatus","busyOverlay","txtBusyTitle","txtBusyStage","busyProgress","txtBusyHint",
-    "btnDetect","txtSearch","lblMods","modsGrid","btnUseSelected","btnOpenFolder","btnOpenCurrentFolder","cmbSourceLang","cmbTargetLang","lblSourceLang","lblTargetLang","tabTranslation","tabInstalledMods","tabGameProfiles","chkPreviewFlag","cmbPreviewFlag","btnCopyWorkshop","btnEditModWorkshopDescription","btnRimWorldModGlossary","btnRimWorldModLearningMode","btnRimWorldModLearningSuggestions","lblCoverageTitle","txtCoveragePL","txtCoverageEN","btnLoadExistingPL","btnLoadExistingEN","tabKenshi","btnDetectKenshi","btnChooseKenshi","txtKenshiPath","btnOpenKenshiFolder","btnScanKenshi","btnTranslateKenshi","btnExportKenshiCsv","btnImportKenshiCsv","btnFcsHelpKenshi","btnBuildKenshi","lblKenshiCount","kenshiGrid","txtKenshiStatus",
+    "btnDetect","txtSearch","lblMods","modsGrid","btnUseSelected","btnOpenFolder","btnOpenCurrentFolder","cmbSourceLang","cmbTargetLang","lblSourceLang","lblTargetLang","tabTranslation","tabInstalledMods","tabGameProfiles","chkPreviewFlag","cmbPreviewFlag","btnCopyWorkshop","btnEditModWorkshopDescription","btnRimWorldModGlossary","btnRimWorldModLearningMode","btnRimWorldModLearningSuggestions","lblCoverageTitle","txtCoveragePL","txtCoverageEN","btnLoadExistingPL","btnLoadExternalPL","btnLoadExistingEN","btnEditMultiline","tabKenshi","btnDetectKenshi","btnChooseKenshi","txtKenshiPath","btnOpenKenshiFolder","btnScanKenshi","btnTranslateKenshi","btnExportKenshiCsv","btnImportKenshiCsv","btnFcsHelpKenshi","btnBuildKenshi","lblKenshiCount","kenshiGrid","txtKenshiStatus",
   "btnUpdateExisting",
   "lblSearchTitle","txtSearchTerm","cmbSearchScope","btnClearSearch","lblReplaceTitle","txtReplaceTerm","btnReplaceAll","lblSearchCount",
   "tabWorkshop","txtCreatorName","txtSteamProfile","btnSaveCreatorProfile","txtWorkshopItemInput","btnAddWorkshopItem","btnRefreshWorkshop","btnRemoveWorkshopItem","btnOpenWorkshopItem","lblWorkshopItems","lblWorkshopSubscriptions","lblWorkshopFavorites","lblWorkshopViews","workshopGrid","txtWorkshopStatus",
@@ -9488,24 +9657,29 @@ function Get-CoverageText([string]$code) {
     }
 
     $c = $script:LanguageCoverage[$code]
-    $statusText = if ($script:UiLanguage -eq "en") {
-        switch ($c.Status) {
-            "none" { "none" }
-            "partial" { "partial" }
-            "complete" { "complete" }
-            default { $c.Status }
+    $sourceCode = Get-SelectedSourceLanguageCode
+    $isSource = ($code -ieq $sourceCode)
+
+    if ($isSource -and [int]$c.Found -eq 0) {
+        if ($script:UiLanguage -eq "en") {
+            return "Source localization $name`: none (using texts from Defs)"
         }
-    } else {
-        switch ($c.Status) {
-            "none" { "brak" }
-            "partial" { "częściowe" }
-            "complete" { "pełne" }
-            default { $c.Status }
-        }
+        return "Lokalizacja źródłowa $name`: brak (używane są teksty z Defs)"
     }
 
-    return "$name`: $($c.Matched)/$($c.Total) ($($c.Percent)%) - $statusText"
+    if ($isSource) {
+        if ($script:UiLanguage -eq "en") {
+            return "Source localization $name`: $($c.Matched)/$($c.Total) entries"
+        }
+        return "Lokalizacja źródłowa $name`: $($c.Matched)/$($c.Total) wpisów"
+    }
+
+    if ($script:UiLanguage -eq "en") {
+        return "Target $name`: $($c.Translated)/$($c.Total) ($($c.Percent)%) • identical to source: $($c.Identical) • missing: $($c.Missing)"
+    }
+    return "Tłumaczenie $name`: $($c.Translated)/$($c.Total) ($($c.Percent)%) • identyczne ze źródłem: $($c.Identical) • brakuje: $($c.Missing)"
 }
+
 if ($null -ne $txtCreatorId) { $txtCreatorId.Text = Get-ToolkitCreatorId }
 if ($null -ne $btnSaveCreatorId) {
     $btnSaveCreatorId.Add_Click({
@@ -9562,7 +9736,8 @@ function Refresh-LanguageCoverageUi {
     $txtCoveragePL.Text = Get-CoverageText $dst
 
     $btnLoadExistingEN.Content = if ($script:UiLanguage -eq "en") { "Load source localization" } else { "Wczytaj lokalizację źródłową" }
-    $btnLoadExistingPL.Content = if ($script:UiLanguage -eq "en") { "Load target translation" } else { "Wczytaj tłumaczenie docelowe" }
+    $btnLoadExistingPL.Content = if ($script:UiLanguage -eq "en") { "Refresh target translation" } else { "Odśwież tłumaczenie docelowe" }
+    if ($null -ne $btnLoadExternalPL) { $btnLoadExternalPL.Content = if ($script:UiLanguage -eq "en") { "Load from folder..." } else { "Wczytaj z folderu..." } }
 
     $btnLoadExistingEN.IsEnabled = ($script:ExistingTranslations.ContainsKey($src) -and $script:ExistingTranslations[$src].Count -gt 0)
     $btnLoadExistingPL.IsEnabled = ($script:ExistingTranslations.ContainsKey($dst) -and $script:ExistingTranslations[$dst].Count -gt 0)
@@ -9622,7 +9797,7 @@ $script:UiText = @{
         DllDiagnostics = "Diagnostyka DLL/UI"
         BuildSeparateMod = "Zbuduj oddzielny mod"
         CopyWorkshop = "Kopiuj opis Workshop"
-        ExistingLanguages = "Istniejące języki"
+        ExistingLanguages = "Stan lokalizacji"
         Search = "Szukaj:"
         Clear = "Wyczyść"
         NewText = "Nowy tekst:"
@@ -9959,8 +10134,10 @@ function Apply-UiLanguage {
     $btnImportKenshiCsv.Content = "Import CSV"
     $btnFcsHelpKenshi.Content = "How to export data with FCS?"
     $btnBuildKenshi.Content = "Prepare pl_PL files"
-    $lblCoverageTitle.Text = "Existing languages:"
-    $btnLoadExistingPL.Content = "Reload Polish"
+    $lblCoverageTitle.Text = "Localization status:"
+    $btnLoadExistingPL.Content = "Refresh target translation"
+    if ($null -ne $btnLoadExternalPL) { $btnLoadExternalPL.Content = "Load from folder..." }
+    if ($null -ne $btnEditMultiline) { $btnEditMultiline.Content = "Edit multiline..." }
     $btnLoadExistingEN.Content = "Reload English"
     $btnUpdateExisting.Content = "Update existing translation"
     $lblSearchTitle.Text = "Search:"
@@ -10887,20 +11064,55 @@ $btnBuildKenshi.Add_Click({
 })
 
 $btnLoadExistingPL.Add_Click({
-    $loaded = Apply-ExistingTranslation "pl"
+    $code = Get-SelectedTargetLanguageCode
+    $result = Apply-ExistingTranslation $code
     $txtStatus.Text = if ($script:UiLanguage -eq "en") {
-        "Loaded $loaded existing Polish translation entries."
+        "Loaded $($result.Loaded) target entries: $($result.Translated) translated, $($result.Identical) identical to source."
     } else {
-        "Załadowano $loaded istniejących polskich wpisów tłumaczenia."
+        "Wczytano $($result.Loaded) wpisów docelowych: $($result.Translated) przetłumaczonych, $($result.Identical) identycznych ze źródłem."
     }
 })
 
-$btnLoadExistingEN.Add_Click({
-    $loaded = Apply-ExistingTranslation "en"
+$btnLoadExternalPL.Add_Click({
+    $code = Get-SelectedTargetLanguageCode
+    $picked = Show-ModernFolderPicker `
+        $(if ($script:UiLanguage -eq "en") { "Choose a translation mod or target language folder" } else { "Wybierz mod tłumaczenia albo folder języka docelowego" }) `
+        $txtModPath.Text
+    if (-not $picked) { return }
+
+    $entries = Read-ExternalTargetTranslation $picked $code
+    if ($null -eq $entries -or $entries.Count -eq 0) {
+        [System.Windows.MessageBox]::Show(
+            $(if ($script:UiLanguage -eq "en") { "No LanguageData XML files were found for the selected target language." } else { "Nie znaleziono plików LanguageData XML dla wybranego języka docelowego." }),
+            "Mod Translation Toolkit") | Out-Null
+        return
+    }
+
+    $script:ExistingTranslations[$code] = $entries
+    $script:LanguageCoverage[$code] = Get-RimWorldCoverageStats $entries
+    $result = Apply-TranslationEntries $entries
+    Refresh-LanguageCoverageUi
     $txtStatus.Text = if ($script:UiLanguage -eq "en") {
-        "Loaded $loaded existing English translation entries."
+        "Loaded external translation: $($result.Loaded) entries, including $($result.Translated) translated and $($result.Identical) identical to source."
     } else {
-        "Załadowano $loaded istniejących angielskich wpisów tłumaczenia."
+        "Wczytano zewnętrzne tłumaczenie: $($result.Loaded) wpisów, w tym $($result.Translated) przetłumaczonych i $($result.Identical) identycznych ze źródłem."
+    }
+})
+
+$btnEditMultiline.Add_Click({
+    if ($null -eq $grid.SelectedItem) {
+        $txtStatus.Text = if ($script:UiLanguage -eq "en") { "Select an entry to edit." } else { "Zaznacz wpis do edycji." }
+        return
+    }
+    Show-RimWorldMultilineEditor $grid.SelectedItem
+})
+
+$btnLoadExistingEN.Add_Click({
+    $result = Apply-ExistingTranslation "en"
+    $txtStatus.Text = if ($script:UiLanguage -eq "en") {
+        "Loaded $($result.Loaded) existing English localization entries."
+    } else {
+        "Załadowano $($result.Loaded) istniejących angielskich wpisów lokalizacji."
     }
 })
 
@@ -12202,7 +12414,7 @@ function Build-RimWorldGameTranslationMod([string]$parentFolder) {
   <name>$([System.Security.SecurityElement]::Escape($displayName))</name>
   <author>$([System.Security.SecurityElement]::Escape([string]$txtAuthor.Text))</author>
   <packageId>$packageId</packageId>
-  <modVersion>0.10.20</modVersion>
+  <modVersion>0.10.21</modVersion>
   <supportedVersions>
     <li>$version</li>
   </supportedVersions>
