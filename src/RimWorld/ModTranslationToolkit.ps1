@@ -7,7 +7,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-$AppVersion = "0.10.16"
+$AppVersion = "0.10.20"
 $script:UiLanguage = "pl"
 $script:Entries = New-Object System.Collections.ArrayList
 $script:Mods = New-Object System.Collections.ArrayList
@@ -4456,8 +4456,8 @@ function Update-LanguageCoverage([string]$modPath) {
 
         $matched = 0
         foreach ($e in $script:Entries) {
-            $id = "$($e.File)|$($e.Key)".ToLowerInvariant()
-            if ($entries.ContainsKey($id)) { $matched++ }
+            $oldEntry = Find-RimWorldExistingLanguageEntry $entries $e
+            if ($null -ne $oldEntry) { $matched++ }
         }
 
         $percent = if ($sourceCount -gt 0) { [Math]::Round(($matched * 100.0) / $sourceCount, 1) } else { 0 }
@@ -4491,11 +4491,11 @@ function AutoLoad-ExistingTargetTranslation {
     $loaded = 0
 
     foreach ($e in $script:Entries) {
-        $id = "$($e.File)|$($e.Key)".ToLowerInvariant()
+        $oldEntry = Find-RimWorldExistingLanguageEntry $entries $e
 
-        if ($entries.ContainsKey($id)) {
+        if ($null -ne $oldEntry) {
             # Existing localization wins. Do not overwrite it with machine translation.
-            $existingText = [string]$entries[$id].Text
+            $existingText = [string]$oldEntry.Text
             if (-not [string]::IsNullOrWhiteSpace($existingText)) {
                 $e.Translation = $existingText
                 $loaded++
@@ -4514,9 +4514,9 @@ function Apply-ExistingTranslation([string]$code) {
     $loaded = 0
 
     foreach ($e in $script:Entries) {
-        $id = "$($e.File)|$($e.Key)".ToLowerInvariant()
-        if ($entries.ContainsKey($id)) {
-            $e.Translation = [string]$entries[$id].Text
+        $oldEntry = Find-RimWorldExistingLanguageEntry $entries $e
+        if ($null -ne $oldEntry) {
+            $e.Translation = [string]$oldEntry.Text
             $loaded++
         }
     }
@@ -4931,7 +4931,7 @@ function Scan-KeyBindingDefs([string]$modPath) {
 
                 foreach ($def in $doc.DocumentElement.ChildNodes) {
                     if ($def.NodeType -ne [System.Xml.XmlNodeType]::Element) { continue }
-                    if ($def.Name -ne "KeyBindingDef") { continue }
+                    if ([string]$def.LocalName -ne "KeyBindingDef") { continue }
 
                     $defNameNode = $def.SelectSingleNode("defName")
                     if ($null -eq $defNameNode -or [string]::IsNullOrWhiteSpace($defNameNode.InnerText)) { continue }
@@ -5068,11 +5068,120 @@ function Resolve-InheritedDefField(
     }
 }
 
+# ---------- RimWorld v0.10.18 extraction/update compatibility ----------
+function Get-RimWorldCanonicalLanguageId([string]$file, [string]$key, [string]$defType = "") {
+    $normFile = ([string]$file).Replace('/', '\')
+    if ([string]::IsNullOrWhiteSpace($defType) -and $normFile -match '(?i)^DefInjected\\([^\\]+)\\') {
+        $defType = [string]$Matches[1]
+    }
+    if (-not [string]::IsNullOrWhiteSpace($defType)) {
+        return ("definjected|$defType|$key").ToLowerInvariant()
+    }
+    if ($normFile -match '(?i)^Keyed\\') {
+        return ("keyed|$key").ToLowerInvariant()
+    }
+    return ("file|$normFile|$key").ToLowerInvariant()
+}
+
+function Find-RimWorldExistingLanguageEntry($entries, $entry) {
+    if ($null -eq $entries -or $null -eq $entry) { return $null }
+
+    # Exact historical match always wins.
+    $exact = "$($entry.File)|$($entry.Key)".ToLowerInvariant()
+    if ($entries.ContainsKey($exact)) { return $entries[$exact] }
+
+    $wanted = Get-RimWorldCanonicalLanguageId ([string]$entry.File) ([string]$entry.Key) ([string]$entry.DefType)
+    $candidates = New-Object System.Collections.ArrayList
+    foreach ($old in @($entries.Values)) {
+        if ($null -eq $old) { continue }
+        $oldCanonical = Get-RimWorldCanonicalLanguageId ([string]$old.File) ([string]$old.Key)
+        if ($oldCanonical -eq $wanted) { [void]$candidates.Add($old) }
+    }
+    if ($candidates.Count -eq 0) { return $null }
+
+    $texts = @($candidates | ForEach-Object { ([string]$_.Text).Trim() } | Sort-Object -Unique)
+    if ($texts.Count -gt 1) {
+        if ($null -eq $script:CrossFileTranslationConflicts) { $script:CrossFileTranslationConflicts = New-Object System.Collections.ArrayList }
+        [void]$script:CrossFileTranslationConflicts.Add([pscustomobject]@{
+            Id = $wanted
+            Key = [string]$entry.Key
+            DefType = [string]$entry.DefType
+            Values = ($texts -join ' || ')
+        })
+        return $null
+    }
+    return $candidates[0]
+}
+
+function Get-RimWorldNestedLocalizableNodes($node, [string]$path, $fieldSet) {
+    $result = New-Object System.Collections.ArrayList
+    if ($null -eq $node) { return @() }
+
+    $children = @($node.ChildNodes | Where-Object { $_.NodeType -eq [System.Xml.XmlNodeType]::Element })
+    foreach ($child in $children) {
+        $name = [string]$child.Name
+        if ($name -eq 'defName') { continue }
+
+        $segment = $name
+        if ($name -eq 'li') {
+            $siblings = @($node.ChildNodes | Where-Object { $_.NodeType -eq [System.Xml.XmlNodeType]::Element -and $_.Name -eq 'li' })
+            $idx = 0
+            for ($i = 0; $i -lt $siblings.Count; $i++) {
+                if ([object]::ReferenceEquals($siblings[$i], $child)) { $idx = $i; break }
+            }
+            $segment = [string]$idx
+        }
+        $childPath = if ([string]::IsNullOrWhiteSpace($path)) { $segment } else { "$path.$segment" }
+        $grandChildren = @($child.ChildNodes | Where-Object { $_.NodeType -eq [System.Xml.XmlNodeType]::Element })
+
+        if ($fieldSet.Contains($name) -and $grandChildren.Count -eq 0) {
+            $value = [string]$child.InnerText
+            if (-not [string]::IsNullOrWhiteSpace($value)) {
+                [void]$result.Add([pscustomobject]@{ Path = $childPath; Field = $name; Value = $value.TrimEnd() })
+            }
+        }
+        if ($grandChildren.Count -gt 0) {
+            foreach ($nested in @(Get-RimWorldNestedLocalizableNodes $child $childPath $fieldSet)) {
+                [void]$result.Add($nested)
+            }
+        }
+    }
+    return @($result)
+}
+
+function ConvertTo-RimWorldEnglishPlural([string]$label) {
+    if ([string]::IsNullOrWhiteSpace($label)) { return '' }
+    $s = $label.Trim()
+    if ($s -match '(?i)[^aeiou]y$') { return ($s.Substring(0, $s.Length - 1) + 'ies') }
+    if ($s -match '(?i)(s|x|z|ch|sh)$') { return ($s + 'es') }
+    return ($s + 's')
+}
+
+function Add-RimWorldGeneratedDefEntries($record, [string]$defType, [string]$defName, $parentIndex) {
+    # RimTrans/RimWorld compatibility: PawnKind labelPlural when absent.
+    if ($defType -eq 'PawnKindDef') {
+        $localPlural = Get-DirectDefFieldNode $record.Node 'labelPlural'
+        if ($null -eq $localPlural -or [string]::IsNullOrWhiteSpace([string]$localPlural.InnerText)) {
+            $visited = New-Object 'System.Collections.Generic.HashSet[string]'
+            $labelResolved = Resolve-InheritedDefField $record 'label' $parentIndex $visited
+            if ($null -ne $labelResolved -and $null -ne $labelResolved.Node) {
+                $plural = ConvertTo-RimWorldEnglishPlural ([string]$labelResolved.Node.InnerText)
+                if (-not [string]::IsNullOrWhiteSpace($plural)) {
+                    Add-Entry 'DefInjected' "DefInjected\$defType\$defType.xml" "$defName.labelPlural" $plural $defType $defName 'labelPlural'
+                }
+            }
+        }
+    }
+}
+# ---------- end v0.10.18 helpers ----------
 function Scan-Defs([string]$modPath) {
     $fields = @(
-        "label","description","jobString","reportString","gerund",
-        "labelShort","labelNoun","labelPlural","labelMale","labelFemale",
-        "inspectString","baseDesc","letterLabel","letterText"
+        "label","description","jobString","reportString","gerund","verb",
+        "labelShort","labelNoun","labelPlural","labelMale","labelMalePlural","labelFemale","labelFemalePlural",
+        "inspectString","baseDesc","letterLabel","letterText","deathMessage","leaderTitle","pawnsPlural",
+        "fixedName","formatString","labelTendedWell","labelTendedWellInner","labelSolidTendedWell",
+        "destroyedLabel","destroyedOutLabel","adjective","helpText","summary","text","customLabel","useLabel",
+        "ingestCommandString","ingestReportString","recoveryMessage","discoverLetterLabel","discoverLetterText"
     )
 
     $countBefore = $script:Entries.Count
@@ -5095,7 +5204,7 @@ function Scan-Defs([string]$modPath) {
                 foreach ($def in @($doc.DocumentElement.ChildNodes)) {
                     if ($def.NodeType -ne [System.Xml.XmlNodeType]::Element) { continue }
 
-                    $defType = [string]$def.Name
+                    $defType = [string]$def.LocalName
                     $defName = ""
                     $defNameNode = Get-DirectDefFieldNode $def "defName"
                     if ($null -ne $defNameNode -and -not [string]::IsNullOrWhiteSpace([string]$defNameNode.InnerText)) {
@@ -5170,6 +5279,15 @@ function Scan-Defs([string]$modPath) {
                 })
             }
         }
+
+        # Recursive local fields (tools.0.label, comps.0.tools.0.label, injuryProps.*, etc.).
+        $fieldSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+        foreach ($f in $fields) { [void]$fieldSet.Add([string]$f) }
+        foreach ($nested in @(Get-RimWorldNestedLocalizableNodes $record.Node '' $fieldSet)) {
+            Add-Entry "DefInjected" "DefInjected\$defType\$defType.xml" "$defName.$($nested.Path)" ([string]$nested.Value) $defType $defName ([string]$nested.Field)
+        }
+
+        Add-RimWorldGeneratedDefEntries $record $defType $defName $parentIndex
     }
 
     return ($script:Entries.Count - $countBefore)
@@ -5815,9 +5933,9 @@ function Open-ExistingTranslationMod([string]$translationModPath) {
     $loaded = 0
 
     foreach ($e in $script:Entries) {
-        $id = "$($e.File)|$($e.Key)".ToLowerInvariant()
-        if ($existing.ContainsKey($id)) {
-            $e.Translation = [string]$existing[$id].Text
+        $oldEntry = Find-RimWorldExistingLanguageEntry $existing $e
+        if ($null -ne $oldEntry) {
+            $e.Translation = [string]$oldEntry.Text
             $loaded++
         }
     }
@@ -5999,9 +6117,9 @@ function Start-TranslationUpdate([string]$updatedOriginalPath, [string]$translat
     $missing = 0
 
     foreach ($e in $script:Entries) {
-        $id = "$($e.File)|$($e.Key)".ToLowerInvariant()
-        if ($oldMap.ContainsKey($id)) {
-            $oldText = [string]$oldMap[$id].Text
+        $oldEntry = Find-RimWorldExistingLanguageEntry $oldMap $e
+        if ($null -ne $oldEntry) {
+            $oldText = [string]$oldEntry.Text
             if (-not [string]::IsNullOrWhiteSpace($oldText)) {
                 $e.Translation = $oldText
                 $preserved++
@@ -6019,12 +6137,17 @@ function Start-TranslationUpdate([string]$updatedOriginalPath, [string]$translat
 
     $currentIds = @{}
     foreach ($e in $script:Entries) {
-        $currentIds["$($e.File)|$($e.Key)".ToLowerInvariant()] = $true
+        $cid = Get-RimWorldCanonicalLanguageId ([string]$e.File) ([string]$e.Key) ([string]$e.DefType)
+        $currentIds[$cid] = $true
     }
 
     $obsolete = 0
-    foreach ($id in $oldMap.Keys) {
-        if (-not $currentIds.ContainsKey($id)) { $obsolete++ }
+    $oldCanonicalSeen = @{}
+    foreach ($oldEntry in @($oldMap.Values)) {
+        $cid = Get-RimWorldCanonicalLanguageId ([string]$oldEntry.File) ([string]$oldEntry.Key)
+        if ($oldCanonicalSeen.ContainsKey($cid)) { continue }
+        $oldCanonicalSeen[$cid] = $true
+        if (-not $currentIds.ContainsKey($cid)) { $obsolete++ }
     }
 
     $script:EditingTranslationModPath = $translationModPath
@@ -6148,18 +6271,66 @@ function Get-DroppedFolderPath($e) {
     return ""
 }
 
+function Set-ToolkitWorkStatus([string]$text) {
+    try {
+        $isDone = ($text -match '^(Gotowe|Done)')
+
+        if ($null -ne $txtStatus) {
+            $txtStatus.Text = $text
+        }
+
+        if ($null -ne $busyOverlay) {
+            if ($isDone) {
+                $busyOverlay.Visibility = [System.Windows.Visibility]::Collapsed
+            } else {
+                if ($null -ne $txtBusyTitle) {
+                    $txtBusyTitle.Text = if ($script:UiLanguage -eq "en") { "Scanning mod..." } else { "Skanowanie moda..." }
+                }
+                if ($null -ne $txtBusyStage) { $txtBusyStage.Text = $text }
+                if ($null -ne $txtBusyHint) {
+                    $txtBusyHint.Text = if ($script:UiLanguage -eq "en") {
+                        "The program is working. Large mods may take a moment."
+                    } else {
+                        "Program pracuje. Przy dużych modach może to potrwać chwilę."
+                    }
+                }
+                $busyOverlay.Visibility = [System.Windows.Visibility]::Visible
+            }
+        }
+
+        if ($null -ne $window) {
+            $window.Cursor = if ($isDone) { [System.Windows.Input.Cursors]::Arrow } else { [System.Windows.Input.Cursors]::Wait }
+            $window.UpdateLayout()
+            if ($null -ne $window.Dispatcher) {
+                # Force the busy overlay to be painted before entering the next synchronous scan stage.
+                $window.Dispatcher.Invoke([action]{}, [System.Windows.Threading.DispatcherPriority]::Render)
+            }
+        }
+    } catch {}
+}
+
 function Analyze-Mod([string]$modPath) {
     $script:Entries.Clear()
     $script:EntryKeys = @{}
+    $script:CrossFileTranslationConflicts = New-Object System.Collections.ArrayList
     $script:OriginalModPath = $modPath
     $script:DetectedFromDefs = $false
     $script:SelectedContentVersion = ""
 
+    Set-ToolkitWorkStatus "Odczytywanie informacji o modzie..."
     Read-AboutXml $modPath
 
     $sourceCode = Get-SelectedSourceLanguageCode
+    Set-ToolkitWorkStatus "Skanowanie istniejących lokalizacji..."
     $langCount = Scan-EnglishLanguages $modPath
-    $defsCount = if ($sourceCode -eq "en") { Scan-Defs $modPath } else { 0 }
+
+    $defsCount = 0
+    if ($sourceCode -eq "en") {
+        Set-ToolkitWorkStatus "Skanowanie Defów i zagnieżdżonych pól..."
+        $defsCount = Scan-Defs $modPath
+    }
+
+    Set-ToolkitWorkStatus "Analiza KeyBindingDef..."
     $keybindScan = Scan-KeyBindingDefs $modPath
 
     # DLL/UI diagnostics are intentionally lazy and run only on button press.
@@ -6172,9 +6343,12 @@ function Analyze-Mod([string]$modPath) {
     $txtModName.Text = $script:OriginalModName
     $txtPackageId.Text = $script:OriginalPackageId
     Refresh-Grid
-    Update-LanguageCoverage $modPath
 
+    Set-ToolkitWorkStatus "Dopasowywanie istniejących tłumaczeń..."
+    Update-LanguageCoverage $modPath
     $autoLoaded = AutoLoad-ExistingTargetTranslation
+    Set-ToolkitWorkStatus "Gotowe. Wpisy: $($script:Entries.Count)."
+
     return [pscustomobject]@{
         LanguageEntries = $langCount
         DefEntries = $defsCount
@@ -8390,7 +8564,7 @@ function Apply-CreatorProfileToTranslator {
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Mod Translation Toolkit v0.10.16"
+        Title="Mod Translation Toolkit v0.10.20"
         Height="840" Width="1260"
         WindowStartupLocation="CenterScreen"
         Background="#121018"
@@ -8549,7 +8723,7 @@ function Apply-CreatorProfileToTranslator {
         <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
           <Button Name="btnApiSettings" Content="API / Tłumaczenie" Margin="0,0,8,0"/>
           <Border Background="#2B2038" CornerRadius="5" Padding="10,5" VerticalAlignment="Center">
-            <TextBlock Text="v0.10.16" Foreground="#CDA8F2" FontWeight="SemiBold"/>
+            <TextBlock Text="v0.10.20" Foreground="#CDA8F2" FontWeight="SemiBold"/>
           </Border>
         </StackPanel>
       </Grid>
@@ -9142,6 +9316,24 @@ function Apply-CreatorProfileToTranslator {
         </Grid>
       </TabItem>
     </TabControl>
+
+    <Border Name="busyOverlay" Grid.RowSpan="2" Panel.ZIndex="999" Background="#D914101C"
+            Visibility="Collapsed" IsHitTestVisible="True">
+      <Grid>
+        <Border Background="#211A2B" BorderBrush="#9D64E8" BorderThickness="1" CornerRadius="10"
+                Padding="28,22" Width="440" HorizontalAlignment="Center" VerticalAlignment="Center">
+          <StackPanel>
+            <TextBlock Name="txtBusyTitle" Text="Skanowanie moda..." FontSize="20" FontWeight="Bold"
+                       Foreground="#D4B5F5" HorizontalAlignment="Center"/>
+            <TextBlock Name="txtBusyStage" Text="Przygotowywanie..." Margin="0,12,0,14"
+                       Foreground="#ECE8F6" TextAlignment="Center" TextWrapping="Wrap"/>
+            <ProgressBar Name="busyProgress" Height="8" IsIndeterminate="True"/>
+            <TextBlock Name="txtBusyHint" Text="Program pracuje. Przy dużych modach może to potrwać chwilę."
+                       Margin="0,12,0,0" Foreground="#AFA2C0" TextAlignment="Center" TextWrapping="Wrap" FontSize="11"/>
+          </StackPanel>
+        </Border>
+      </Grid>
+    </Border>
   </Grid>
 </Window>
 '@
@@ -9151,7 +9343,7 @@ $window = [Windows.Markup.XamlReader]::Load($reader)
 
 $names = @(
     "btnChooseMod","btnAnalyze","btnExport","btnImport","btnAutoTranslate","btnValidate","btnBuild",
-    "txtModPath","txtModName","txtPackageId","txtAuthor","grid","lblCount","txtStatus",
+    "txtModPath","txtModName","txtPackageId","txtAuthor","grid","lblCount","txtStatus","busyOverlay","txtBusyTitle","txtBusyStage","busyProgress","txtBusyHint",
     "btnDetect","txtSearch","lblMods","modsGrid","btnUseSelected","btnOpenFolder","btnOpenCurrentFolder","cmbSourceLang","cmbTargetLang","lblSourceLang","lblTargetLang","tabTranslation","tabInstalledMods","tabGameProfiles","chkPreviewFlag","cmbPreviewFlag","btnCopyWorkshop","btnEditModWorkshopDescription","btnRimWorldModGlossary","btnRimWorldModLearningMode","btnRimWorldModLearningSuggestions","lblCoverageTitle","txtCoveragePL","txtCoverageEN","btnLoadExistingPL","btnLoadExistingEN","tabKenshi","btnDetectKenshi","btnChooseKenshi","txtKenshiPath","btnOpenKenshiFolder","btnScanKenshi","btnTranslateKenshi","btnExportKenshiCsv","btnImportKenshiCsv","btnFcsHelpKenshi","btnBuildKenshi","lblKenshiCount","kenshiGrid","txtKenshiStatus",
   "btnUpdateExisting",
   "lblSearchTitle","txtSearchTerm","cmbSearchScope","btnClearSearch","lblReplaceTitle","txtReplaceTerm","btnReplaceAll","lblSearchCount",
@@ -9245,7 +9437,6 @@ foreach ($n in $names) { Set-Variable -Name $n -Value $window.FindName($n) }
 
 Load-WorkshopProfile
 Apply-CreatorProfileToTranslator
-Apply-CentralUiLanguage
 
 Update-RimWorldLearningUi
 
@@ -11394,9 +11585,12 @@ function Get-RimWorldGameDefSourceEntries([string]$modulePath, [string]$moduleNa
     if (-not (Test-Path -LiteralPath $defsRoot)) { return @() }
 
     $fields = @(
-        "label","description","jobString","reportString","gerund",
-        "labelShort","labelNoun","labelPlural","labelMale","labelFemale",
-        "inspectString","baseDesc","letterLabel","letterText"
+        "label","description","jobString","reportString","gerund","verb",
+        "labelShort","labelNoun","labelPlural","labelMale","labelMalePlural","labelFemale","labelFemalePlural",
+        "inspectString","baseDesc","letterLabel","letterText","deathMessage","leaderTitle","pawnsPlural",
+        "fixedName","formatString","labelTendedWell","labelTendedWellInner","labelSolidTendedWell",
+        "destroyedLabel","destroyedOutLabel","adjective","helpText","summary","text","customLabel","useLabel",
+        "ingestCommandString","ingestReportString","recoveryMessage","discoverLetterLabel","discoverLetterText"
     )
 
     # Two-pass scan, matching the RimWorld Mod workflow:
@@ -11413,7 +11607,7 @@ function Get-RimWorldGameDefSourceEntries([string]$modulePath, [string]$moduleNa
             foreach ($def in @($doc.DocumentElement.ChildNodes)) {
                 if ($def.NodeType -ne [System.Xml.XmlNodeType]::Element) { continue }
 
-                $defType = [string]$def.Name
+                $defType = [string]$def.LocalName
 
                 $defName = ""
                 $defNameNode = Get-DirectDefFieldNode $def "defName"
@@ -12008,7 +12202,7 @@ function Build-RimWorldGameTranslationMod([string]$parentFolder) {
   <name>$([System.Security.SecurityElement]::Escape($displayName))</name>
   <author>$([System.Security.SecurityElement]::Escape([string]$txtAuthor.Text))</author>
   <packageId>$packageId</packageId>
-  <modVersion>0.10.16</modVersion>
+  <modVersion>0.10.20</modVersion>
   <supportedVersions>
     <li>$version</li>
   </supportedVersions>

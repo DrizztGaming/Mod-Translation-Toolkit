@@ -1,5 +1,46 @@
 # Changelog
 
+## v0.10.20
+- Dodano centralny overlay podczas skanowania moda, aby aplikacja nie wyglądała na zawieszoną.
+- Overlay pokazuje aktualny etap pracy i indeterminate progress bar.
+- Wymuszane jest renderowanie overlayu przed wejściem w synchroniczny etap skanowania.
+- Zachowano logikę skanera i dopasowania tłumaczeń z v0.10.19.
+- Zaktualizowano numer wersji w interfejsie i generowanym modVersion.
+
+## 0.10.19 Experimental - 2026-08-26
+
+### Fixed
+- Removed the premature startup call to `Apply-CentralUiLanguage`, eliminating the non-fatal red PowerShell `CommandNotFoundException` shown during startup. Central UI localization is still applied from `Apply-UiLanguage` after the function has been defined.
+- Updated all visible/runtime version markers to `v0.10.19`, including `$AppVersion`, window title, version badge, and generated `modVersion`.
+
+### UI
+- Made long RimWorld mod scan status messages actually render before synchronous work begins. The status bar now updates its layout and pumps the WPF dispatcher at `ContextIdle` between scan stages.
+- Added a wait cursor while scan stages are running and restores the normal cursor when the final `Gotowe` status is set.
+- No changes to the v0.10.18 extraction logic; Glitter Tech should remain at the same 544 entries while retaining the improved 530 automatic matches.
+
+## 0.10.18 Experimental - 2026-08-26
+
+### Fixed
+- Fixed RimWorld `DefType` detection when a Def has an XML `Name` attribute. PowerShell's XML adapter could expose the attribute value through `.Name`, causing types such as `OCDKatana_GT`, `HeavyPowerConduit` or `StabBase` to be used as fake Def types. The scanner now uses the XML node's `LocalName`.
+- Applied the same safe node-name detection to RimWorld Game scanning and KeyBindingDef diagnostics.
+- Version number is now updated in the application title, version badge, `$AppVersion`, and generated mod metadata.
+
+### UI
+- Added visible work-status messages during longer RimWorld mod scans: reading mod info, scanning localizations, scanning Defs/nested fields, analyzing KeyBindingDef, and matching existing translations.
+- The UI dispatcher is refreshed between stages so the status text is visible instead of making the application look frozen.
+
+## 0.10.17 Experimental - 2026-08-25
+
+### RimWorld extraction and translation migration
+- Added cross-file matching for existing `DefInjected` translations using `DefType + key`, so translations survive XML file reorganization.
+- Added key-only cross-file matching for `Keyed` entries.
+- Added conflict detection when duplicate historical keys contain different translations.
+- Added recursive extraction of nested localizable fields such as `tools.0.label` and `comps.0.tools.0.label`.
+- Expanded the RimWorld localizable-field whitelist with fields identified during the RimTrans/Glitter Tech audit.
+- Added generated `PawnKindDef.labelPlural` fallback support.
+- Fixed obsolete-entry counting so moved XML entries are not falsely reported as removed.
+- Blueprint/Frame implied Def generation remains intentionally deferred until it can follow current RimWorld rules safely.
+
 ## 0.10.16 Experimental - 2026-08-07
 
 ### Existing translation update detection fix

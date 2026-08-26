@@ -2,7 +2,7 @@
 
 A Windows desktop helper for translating game mods.
 
-> **Current experimental release:** v0.10.16  
+> **Current experimental release:** v0.10.19  
 > **Supported profiles:** RimWorld Game, RimWorld Mod, Kenshi Game, Project Zomboid Game (experimental), Project Zomboid Mod (experimental)
 
 The project started as a small RimWorld translation helper and is being prepared as a multi-game toolkit with separate game profiles.
