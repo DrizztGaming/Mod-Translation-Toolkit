@@ -185,3 +185,16 @@ Jeżeli mod nie posiada osobnego `Languages/English`, program wyjaśnia, że tek
 Przycisk **Wczytaj z folderu...** pozwala wskazać osobny mod tłumaczenia, folder `Languages` albo bezpośrednio folder języka, np. `Polish`. Przydaje się to przy aktualizowaniu starszych tłumaczeń RimTrans, które nie są częścią moda źródłowego.
 
 Przycisk **Edytuj wieloliniowo...** otwiera zaznaczony wpis w edytorze, który pokazuje znaczniki RimWorld `\n` jako normalne podziały wierszy. Po zapisaniu program zamienia je z powrotem na bezpieczną postać `\n`. Automatyczne tłumaczenie chroni te znaczniki tak samo jak placeholdery.
+
+
+## Nowości v0.10.22: RulePackDef i listy `rulesStrings`
+
+Skaner RimWorld Mod rozpoznaje teraz tłumaczalne elementy `<li>` znajdujące się wewnątrz `rulePack/rulesStrings`. Klucze są generowane z indeksem, np. `CM_Callouts_Common.rulePack.rulesStrings.0`. Nie każde `<li>` jest uznawane za tekst: listy referencji, np. `<include>`, pozostają nietłumaczone. Dodano również pole `name`, także dla niestandardowych typów Def zdefiniowanych przez DLL moda.
+
+
+## Nowości v0.10.23: wpisy techniczne RulePack
+Toolkit rozpoznaje teraz reguły `RulePackDef.rulesStrings[]`, które zawierają wyłącznie składnię gramatyki, odwołania i placeholdery. Takie wpisy są oznaczane statystycznie jako techniczne i nie obniżają procentu ukończenia tłumaczenia. Status pokazuje osobno wpisy przetłumaczone, identyczne ze źródłem, brakujące, techniczne i łączną liczbę wpisów. Długie klucze w tabeli RimWorld Mod mają również tooltip z pełną wartością klucza.
+
+## Nowości v0.10.24: poprawne statystyki po aktualizacji
+
+Po użyciu **Aktualizuj istniejące tłumaczenie** pasek stanu lokalizacji jest teraz przeliczany na podstawie właśnie wczytanego moda tłumaczeniowego. Zachowane tłumaczenia są od razu widoczne w statystykach, zamiast błędnego `0/...`.

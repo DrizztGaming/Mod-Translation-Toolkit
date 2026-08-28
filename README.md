@@ -1,11 +1,11 @@
 ﻿# Mod Translation Toolkit
 
-> **v0.10.21:** clearer translation coverage, external translation-folder import, and a multiline RimWorld text editor.
+> **v0.10.24:** Fixed target-language coverage refresh after loading an existing translation update. v0.10.23 also added RulePack technical-entry classification and full-key tooltips.
 
 
 A Windows desktop helper for translating game mods.
 
-> **Current experimental release:** v0.10.19  
+> **Current experimental release:** v0.10.24  
 > **Supported profiles:** RimWorld Game, RimWorld Mod, Kenshi Game, Project Zomboid Game (experimental), Project Zomboid Mod (experimental)
 
 The project started as a small RimWorld translation helper and is being prepared as a multi-game toolkit with separate game profiles.

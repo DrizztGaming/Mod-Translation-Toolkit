@@ -185,3 +185,16 @@ If a mod has no separate `Languages/English` folder, the Toolkit explains that s
 **Load from folder...** can import an existing translation from a separate translation mod, a `Languages` folder, or the target-language folder itself, e.g. `Polish`. This is useful when updating older RimTrans/community translations that are not bundled with the source mod.
 
 **Edit multiline...** opens the selected entry in an editor where RimWorld `\n` markers are displayed as normal line breaks. Saving converts them back to safe `\n` markers. Automatic translation protects these line-break markers together with normal placeholders.
+
+
+## v0.10.22: RulePackDef and `rulesStrings` lists
+
+The RimWorld Mod scanner now recognizes translatable bare `<li>` values inside `rulePack/rulesStrings`. Keys are generated with stable indexes, for example `CM_Callouts_Common.rulePack.rulesStrings.0`. Not every `<li>` is treated as text: reference lists such as `<include>` remain untouched. The `name` field is also supported, including custom Def types defined by mod DLLs.
+
+
+## v0.10.23: technical RulePack entries
+The Toolkit now recognizes `RulePackDef.rulesStrings[]` rules that contain grammar syntax, references and placeholders only. These entries are counted as technical and no longer reduce translation completion percentages. Coverage reports translated, identical, missing, technical and total entries separately. Long keys in the RimWorld Mod grid also expose their full value in a tooltip.
+
+## v0.10.24: correct coverage after translation update
+
+After using **Update existing translation**, target-language coverage is now recalculated from the translation mod that was just loaded. Preserved translations are immediately reflected in the coverage statistics instead of a misleading `0/...` state.

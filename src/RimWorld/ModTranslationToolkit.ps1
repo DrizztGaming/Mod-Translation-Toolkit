@@ -7,7 +7,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-$AppVersion = "0.10.21"
+$AppVersion = "0.10.24"
 $script:UiLanguage = "pl"
 $script:Entries = New-Object System.Collections.ArrayList
 $script:Mods = New-Object System.Collections.ArrayList
@@ -4451,14 +4451,42 @@ function Test-RimWorldSourceCopy([string]$source,[string]$translation) {
     return ($a -ceq $b)
 }
 
+function Test-RimWorldTechnicalEntry($entry) {
+    if ($null -eq $entry) { return $false }
+    if ([string]$entry.DefType -ine 'RulePackDef' -or [string]$entry.Field -ine 'rulesStrings[]') { return $false }
+
+    $source = ([string]$entry.Source).Trim()
+    $arrow = $source.IndexOf('->')
+    if ($arrow -lt 0) { return $false }
+
+    # Only inspect the emitted value. Conditions and rule names on the left side
+    # are grammar syntax and are never user-facing text.
+    $rhs = $source.Substring($arrow + 2).Trim()
+    if ([string]::IsNullOrWhiteSpace($rhs)) { return $true }
+
+    # Remove RimWorld grammar placeholders and identifier-like symbols. If no
+    # natural-language letters remain, the rule is structural and does not need
+    # translation (e.g. destroyed_part->[PART_destroyed0_label]).
+    $probe = [regex]::Replace($rhs, '\[[^\]]+\]', '')
+    $probe = [regex]::Replace($probe, '\b[A-Za-z][A-Za-z0-9]*_[A-Za-z0-9_]+\b', '')
+    $probe = [regex]::Replace($probe, '[\s\p{P}\p{S}\d]+', '')
+    return [string]::IsNullOrWhiteSpace($probe)
+}
+
 function Get-RimWorldCoverageStats($languageEntries) {
     $total = $script:Entries.Count
     $matched = 0
     $translated = 0
     $identical = 0
     $empty = 0
+    $technical = 0
 
     foreach ($e in $script:Entries) {
+        if (Test-RimWorldTechnicalEntry $e) {
+            $technical++
+            continue
+        }
+
         $oldEntry = Find-RimWorldExistingLanguageEntry $languageEntries $e
         if ($null -eq $oldEntry) {
             $empty++
@@ -4476,8 +4504,9 @@ function Get-RimWorldCoverageStats($languageEntries) {
         }
     }
 
-    $percent = if ($total -gt 0) { [Math]::Round(($translated * 100.0) / $total, 1) } else { 0 }
-    $status = if ($translated -eq 0) { "none" } elseif (($translated + $identical) -lt $total -or $identical -gt 0) { "partial" } else { "complete" }
+    $translatable = [Math]::Max(0, $total - $technical)
+    $percent = if ($translatable -gt 0) { [Math]::Round(($translated * 100.0) / $translatable, 1) } else { 100 }
+    $status = if ($translatable -eq 0) { "complete" } elseif ($translated -eq 0) { "none" } elseif (($translated + $identical) -lt $translatable -or $identical -gt 0) { "partial" } else { "complete" }
 
     return [pscustomobject]@{
         Found = if ($null -eq $languageEntries) { 0 } else { $languageEntries.Count }
@@ -4485,6 +4514,8 @@ function Get-RimWorldCoverageStats($languageEntries) {
         Translated = $translated
         Identical = $identical
         Missing = $empty
+        Technical = $technical
+        Translatable = $translatable
         Total = $total
         Percent = $percent
         Status = $status
@@ -5277,35 +5308,59 @@ function Find-RimWorldExistingLanguageEntry($entries, $entry) {
     return $candidates[0]
 }
 
-function Get-RimWorldNestedLocalizableNodes($node, [string]$path, $fieldSet) {
+function Get-RimWorldNestedLocalizableNodes($node, [string]$path, $fieldSet, $listContainerSet) {
     $result = New-Object System.Collections.ArrayList
     if ($null -eq $node) { return @() }
 
     $children = @($node.ChildNodes | Where-Object { $_.NodeType -eq [System.Xml.XmlNodeType]::Element })
     foreach ($child in $children) {
-        $name = [string]$child.Name
+        $name = [string]$child.LocalName
         if ($name -eq 'defName') { continue }
 
         $segment = $name
         if ($name -eq 'li') {
-            $siblings = @($node.ChildNodes | Where-Object { $_.NodeType -eq [System.Xml.XmlNodeType]::Element -and $_.Name -eq 'li' })
+            $siblings = @($node.ChildNodes | Where-Object {
+                $_.NodeType -eq [System.Xml.XmlNodeType]::Element -and $_.LocalName -eq 'li'
+            })
             $idx = 0
             for ($i = 0; $i -lt $siblings.Count; $i++) {
                 if ([object]::ReferenceEquals($siblings[$i], $child)) { $idx = $i; break }
             }
             $segment = [string]$idx
         }
+
         $childPath = if ([string]::IsNullOrWhiteSpace($path)) { $segment } else { "$path.$segment" }
         $grandChildren = @($child.ChildNodes | Where-Object { $_.NodeType -eq [System.Xml.XmlNodeType]::Element })
 
-        if ($fieldSet.Contains($name) -and $grandChildren.Count -eq 0) {
+        $isNamedField = $fieldSet.Contains($name) -and $grandChildren.Count -eq 0
+
+        # RimWorld uses some string lists where the translatable values are bare <li>
+        # nodes rather than named fields. Only explicitly known containers are treated
+        # as localizable, so reference lists such as <include><li>SomeRulePack</li></include>
+        # are never translated by accident.
+        $parentName = ''
+        try { $parentName = [string]$node.LocalName } catch {}
+        $isLocalizableListItem = (
+            $name -eq 'li' -and
+            $grandChildren.Count -eq 0 -and
+            $null -ne $listContainerSet -and
+            $listContainerSet.Contains($parentName)
+        )
+
+        if ($isNamedField -or $isLocalizableListItem) {
             $value = [string]$child.InnerText
             if (-not [string]::IsNullOrWhiteSpace($value)) {
-                [void]$result.Add([pscustomobject]@{ Path = $childPath; Field = $name; Value = $value.TrimEnd() })
+                $fieldName = if ($isLocalizableListItem) { "$parentName[]" } else { $name }
+                [void]$result.Add([pscustomobject]@{
+                    Path = $childPath
+                    Field = $fieldName
+                    Value = $value.TrimEnd()
+                })
             }
         }
+
         if ($grandChildren.Count -gt 0) {
-            foreach ($nested in @(Get-RimWorldNestedLocalizableNodes $child $childPath $fieldSet)) {
+            foreach ($nested in @(Get-RimWorldNestedLocalizableNodes $child $childPath $fieldSet $listContainerSet)) {
                 [void]$result.Add($nested)
             }
         }
@@ -5344,9 +5399,15 @@ function Scan-Defs([string]$modPath) {
         "labelShort","labelNoun","labelPlural","labelMale","labelMalePlural","labelFemale","labelFemalePlural",
         "inspectString","baseDesc","letterLabel","letterText","deathMessage","leaderTitle","pawnsPlural",
         "fixedName","formatString","labelTendedWell","labelTendedWellInner","labelSolidTendedWell",
-        "destroyedLabel","destroyedOutLabel","adjective","helpText","summary","text","customLabel","useLabel",
+        "destroyedLabel","destroyedOutLabel","adjective","helpText","summary","text","name","customLabel","useLabel",
         "ingestCommandString","ingestReportString","recoveryMessage","discoverLetterLabel","discoverLetterText"
     )
+
+    # Bare <li> values are translatable only inside explicitly known string-list
+    # containers. This mirrors RimWorld/RimTrans behavior without translating every
+    # XML list item (many lists contain Def references, enum values, etc.).
+    $localizableListContainers = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    [void]$localizableListContainers.Add('rulesStrings')
 
     $countBefore = $script:Entries.Count
     $roots = @(Get-DefRoots $modPath)
@@ -5447,7 +5508,7 @@ function Scan-Defs([string]$modPath) {
         # Recursive local fields (tools.0.label, comps.0.tools.0.label, injuryProps.*, etc.).
         $fieldSet = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
         foreach ($f in $fields) { [void]$fieldSet.Add([string]$f) }
-        foreach ($nested in @(Get-RimWorldNestedLocalizableNodes $record.Node '' $fieldSet)) {
+        foreach ($nested in @(Get-RimWorldNestedLocalizableNodes $record.Node '' $fieldSet $localizableListContainers)) {
             Add-Entry "DefInjected" "DefInjected\$defType\$defType.xml" "$defName.$($nested.Path)" ([string]$nested.Value) $defType $defName ([string]$nested.Field)
         }
 
@@ -6332,6 +6393,15 @@ function Start-TranslationUpdate([string]$updatedOriginalPath, [string]$translat
     $txtModPath.Text = $updatedOriginalPath
     $txtModName.Text = [string]$translationInfo.Name
     $txtPackageId.Text = [string]$translationInfo.PackageId
+
+    # The scan above initializes coverage from the UPDATED SOURCE MOD.
+    # In update mode, the target-language coverage must instead describe the
+    # translation mod that has just been merged into the grid. Without this,
+    # the UI can show 0 translated entries even though the Translation column
+    # is already populated with preserved strings.
+    $script:ExistingTranslations[$targetCode] = $oldMap
+    $script:LanguageCoverage[$targetCode] = Get-RimWorldCoverageStats $oldMap
+
     Refresh-Grid
     Refresh-LanguageCoverageUi
 
@@ -8728,7 +8798,7 @@ function Apply-CreatorProfileToTranslator {
 [xml]$xaml = @'
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        Title="Mod Translation Toolkit v0.10.21"
+        Title="Mod Translation Toolkit v0.10.24"
         Height="840" Width="1260"
         WindowStartupLocation="CenterScreen"
         Background="#121018"
@@ -8887,7 +8957,7 @@ function Apply-CreatorProfileToTranslator {
         <StackPanel Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
           <Button Name="btnApiSettings" Content="API / Tłumaczenie" Margin="0,0,8,0"/>
           <Border Background="#2B2038" CornerRadius="5" Padding="10,5" VerticalAlignment="Center">
-            <TextBlock Text="v0.10.21" Foreground="#CDA8F2" FontWeight="SemiBold"/>
+            <TextBlock Text="v0.10.24" Foreground="#CDA8F2" FontWeight="SemiBold"/>
           </Border>
         </StackPanel>
       </Grid>
@@ -9122,7 +9192,13 @@ function Apply-CreatorProfileToTranslator {
             <DataGrid.Columns>
               <DataGridTextColumn Header="Typ" Binding="{Binding Kind}" Width="95" IsReadOnly="True"/>
               <DataGridTextColumn Header="Plik" Binding="{Binding File}" Width="180" IsReadOnly="True"/>
-              <DataGridTextColumn Header="Klucz" Binding="{Binding Key}" Width="230" IsReadOnly="True"/>
+              <DataGridTemplateColumn Header="Klucz" Width="230" IsReadOnly="True">
+                <DataGridTemplateColumn.CellTemplate>
+                  <DataTemplate>
+                    <TextBlock Text="{Binding Key}" ToolTip="{Binding Key}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+                  </DataTemplate>
+                </DataGridTemplateColumn.CellTemplate>
+              </DataGridTemplateColumn>
               <DataGridTemplateColumn Header="Angielski" Width="*">
                 <DataGridTemplateColumn.CellTemplate>
                   <DataTemplate>
@@ -9675,9 +9751,9 @@ function Get-CoverageText([string]$code) {
     }
 
     if ($script:UiLanguage -eq "en") {
-        return "Target $name`: $($c.Translated)/$($c.Total) ($($c.Percent)%) • identical to source: $($c.Identical) • missing: $($c.Missing)"
+        return "Target $name`: $($c.Translated)/$($c.Translatable) ($($c.Percent)%) • identical to source: $($c.Identical) • missing: $($c.Missing) • technical: $($c.Technical) • total: $($c.Total)"
     }
-    return "Tłumaczenie $name`: $($c.Translated)/$($c.Total) ($($c.Percent)%) • identyczne ze źródłem: $($c.Identical) • brakuje: $($c.Missing)"
+    return "Tłumaczenie $name`: $($c.Translated)/$($c.Translatable) ($($c.Percent)%) • identyczne ze źródłem: $($c.Identical) • brakuje: $($c.Missing) • techniczne: $($c.Technical) • razem: $($c.Total)"
 }
 
 if ($null -ne $txtCreatorId) { $txtCreatorId.Text = Get-ToolkitCreatorId }
@@ -11801,7 +11877,7 @@ function Get-RimWorldGameDefSourceEntries([string]$modulePath, [string]$moduleNa
         "labelShort","labelNoun","labelPlural","labelMale","labelMalePlural","labelFemale","labelFemalePlural",
         "inspectString","baseDesc","letterLabel","letterText","deathMessage","leaderTitle","pawnsPlural",
         "fixedName","formatString","labelTendedWell","labelTendedWellInner","labelSolidTendedWell",
-        "destroyedLabel","destroyedOutLabel","adjective","helpText","summary","text","customLabel","useLabel",
+        "destroyedLabel","destroyedOutLabel","adjective","helpText","summary","text","name","customLabel","useLabel",
         "ingestCommandString","ingestReportString","recoveryMessage","discoverLetterLabel","discoverLetterText"
     )
 
@@ -12414,7 +12490,7 @@ function Build-RimWorldGameTranslationMod([string]$parentFolder) {
   <name>$([System.Security.SecurityElement]::Escape($displayName))</name>
   <author>$([System.Security.SecurityElement]::Escape([string]$txtAuthor.Text))</author>
   <packageId>$packageId</packageId>
-  <modVersion>0.10.21</modVersion>
+  <modVersion>0.10.24</modVersion>
   <supportedVersions>
     <li>$version</li>
   </supportedVersions>

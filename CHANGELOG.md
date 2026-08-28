@@ -1,5 +1,29 @@
 ﻿# Changelog
 
+## v0.10.24
+
+- Fixed target-language coverage statistics after **Update existing translation**.
+- The coverage bar now immediately reflects preserved, identical, missing and technical entries loaded from the existing translation mod.
+- Prevented the misleading `0 translated` state while the grid already contained preserved translations.
+- Updated application/version metadata to v0.10.24.
+
+## v0.10.23
+- Added structural/technical RulePack classification for `RulePackDef.rulesStrings[]`.
+- Technical grammar-only rules no longer reduce translation completion percentages or count as missing translations.
+- Coverage now reports translated, identical, missing, technical, and total entries separately.
+- Added full-key tooltips to the RimWorld Mod translation grid for long keys.
+- Callouts regression case: 353 total entries, with grammar-only rules classified separately from user-facing text.
+- Updated application/version metadata to v0.10.23.
+
+## v0.10.22
+
+- Added context-aware extraction of translatable `<li>` entries inside RimWorld `rulesStrings` collections.
+- `RulePackDef.rulePack.rulesStrings.*` entries are now generated with stable numeric indexes, matching RimWorld/RimTrans translation keys.
+- Added the `name` Def field to the localizable-field set, including support for custom DLL-defined Def types.
+- Kept list extraction conservative: bare `<li>` values are translated only inside explicitly known localizable containers, so reference lists such as `<include>` are not treated as text.
+- Added Callouts (`2362736503`) as a regression case: current source contains 323 `rulesStrings` entries and 2 custom-Def `name` entries in addition to 28 Keyed strings.
+- Updated application/version metadata to v0.10.22.
+
 ## v0.10.21
 
 - Improved RimWorld translation coverage reporting: translated / identical to source / missing.
