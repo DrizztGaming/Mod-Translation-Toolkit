@@ -195,6 +195,28 @@ Skaner RimWorld Mod rozpoznaje teraz tłumaczalne elementy `<li>` znajdujące si
 ## Nowości v0.10.23: wpisy techniczne RulePack
 Toolkit rozpoznaje teraz reguły `RulePackDef.rulesStrings[]`, które zawierają wyłącznie składnię gramatyki, odwołania i placeholdery. Takie wpisy są oznaczane statystycznie jako techniczne i nie obniżają procentu ukończenia tłumaczenia. Status pokazuje osobno wpisy przetłumaczone, identyczne ze źródłem, brakujące, techniczne i łączną liczbę wpisów. Długie klucze w tabeli RimWorld Mod mają również tooltip z pełną wartością klucza.
 
+## Nowości v0.10.25: słownik EN→PL i kontrola terminologii
+
+W profilach RimWorld Game i RimWorld Mod przycisk **Glosariusz** otwiera teraz dwie rozdzielone warstwy danych: słownik ogólny oraz terminologię RimWorld/modu. Warstwy są rozstrzygane w kolejności **Mod > RimWorld > Ogólny**.
+
+W profilu RimWorld Mod obok **Stanu lokalizacji** znajduje się podręczna tabela słownika. Zaznaczenie wiersza pokazuje wszystkie pasujące terminy, a zaznaczenie konkretnego słowa lub frazy w kolumnie **Angielski** zawęża tabelę do tego wpisu. Podgląd działa lokalnie i nie wywołuje płatnego API.
+
+Każdy wpis może zawierać termin angielski, preferowany odpowiednik polski, alternatywy/synonimy, zakazane warianty, kontekst i notatkę. Wartości wielokrotne rozdzielaj znakiem `|`.
+
+Przycisk **Ekspert / AI** przygotowuje dla zaznaczonego wiersza gotowy kontekst tłumaczenia. **Sprawdź terminy** raportuje niespójne i zakazane warianty. Raport niczego nie zmienia. Zastosowanie dokładnych dopasowań do istniejących etykiet wymaga osobnego potwierdzenia.
+
+Stary plik `rimworld-glossary.csv` z v0.10.24 pozostaje zgodny i jest automatycznie odczytywany.
+
+## Nowości v0.10.26: stały lokalny panel słownika
+
+Panel **Słownik EN→PL** pozostaje stale widoczny po prawej stronie sekcji **Stan lokalizacji**. Zaznacz pojedyncze słowo lub krótką frazę w kolumnie **Angielski**, aby zobaczyć główny polski odpowiednik i alternatywy jako osobne wyniki. Panel najpierw uwzględnia reguły Glossary, a następnie dołączony do programu lokalny słownik. Nie używa API ani połączenia z Internetem.
+
+Pojedyncze kliknięcie tylko wybiera propozycję. Dwuklik wstawia ją w miejscu kursora w aktualnie edytowanym polskim polu albo zastępuje zaznaczony fragment. Jeśli pole nie jest aktywnie edytowane, pusty wpis zostanie uzupełniony, a do niepustego tekstu wynik zostanie dopisany — istniejąca treść nie jest automatycznie kasowana.
+
+Przycisk **Dodaj do Glossary** zapisuje wybraną parę jako kontekstową regułę warstwy moda. Istniejący edytor Glossary, Ekspert/AI i diagnostyka terminologii działają bez zmian.
+
+W edytorze Glossary dostępne są też przyciski **Eksportuj do udostępnienia** i **Importuj od tłumacza**. Eksport tworzy przenośny plik CSV, który można wysłać innemu tłumaczowi. Import scala otrzymane wpisy z Twoim słownikiem: istniejące preferowane tłumaczenie pozostaje bez zmian, a nowa propozycja trafia do alternatyw.
+
 ## Nowości v0.10.24: poprawne statystyki po aktualizacji
 
 Po użyciu **Aktualizuj istniejące tłumaczenie** pasek stanu lokalizacji jest teraz przeliczany na podstawie właśnie wczytanego moda tłumaczeniowego. Zachowane tłumaczenia są od razu widoczne w statystykach, zamiast błędnego `0/...`.

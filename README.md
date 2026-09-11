@@ -1,16 +1,21 @@
 ﻿# Mod Translation Toolkit
 
-> **v0.10.24:** Fixed target-language coverage refresh after loading an existing translation update. v0.10.23 also added RulePack technical-entry classification and full-key tooltips.
+> **v0.10.26:** Added a persistent offline EN→PL helper panel with selectable alternatives, safe double-click insertion and Add to Glossary.
 
 
 A Windows desktop helper for translating game mods.
 
-> **Current experimental release:** v0.10.24  
+> **Current experimental release:** v0.10.26  
 > **Supported profiles:** RimWorld Game, RimWorld Mod, Kenshi Game, Project Zomboid Game (experimental), Project Zomboid Mod (experimental)
 
 The project started as a small RimWorld translation helper and is being prepared as a multi-game toolkit with separate game profiles.
 
 ## Features
+
+- **Layered EN→PL terminology:** separate general and RimWorld/mod-specific dictionaries, with `Mod > RimWorld > General` precedence. Entries support a preferred translation, allowed synonyms, forbidden variants, context and notes.
+- **Offline dictionary panel:** selecting an English word or short phrase shows preferred and alternative Polish equivalents from Glossary plus the bundled local lexicon. Double-click inserts a result without a network call; a single click never rewrites the translation.
+- **Expert / AI context:** copies a focused translation instruction for the selected RimWorld entry, including only matching terminology after priority resolution.
+- **Non-destructive terminology diagnostics:** reports inconsistent or forbidden variants without rewriting translations.
 
 - **DLL/UI diagnostics** heuristically scans RimWorld mod assemblies for UI/keybind-related references and strings such as Hotkey, KeyBindingDef, Tooltip, Gizmo, Command, Widgets and Translate.
 - Bilingual manuals (`MANUAL_PL.md`, `MANUAL_EN.md`) are shipped next to the launcher.

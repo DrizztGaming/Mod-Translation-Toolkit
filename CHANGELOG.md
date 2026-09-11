@@ -1,5 +1,30 @@
 ﻿# Changelog
 
+## v0.10.26
+
+- Expanded the persistent EN→PL panel beside **Localization status** with a bundled 138-entry offline starter lexicon.
+- Exact English word and short-phrase selections now show the preferred Polish translation and each alternative as a separate selectable result.
+- Added non-destructive insertion: a single click only selects a result; double-click inserts it at the Polish editor caret or replaces the selected fragment.
+- When no Polish cell is actively edited, double-click fills an empty translation or appends to existing text instead of overwriting it.
+- Added **Add to Glossary**, creating a contextual Mod-layer rule for the current package while preserving `Mod > RimWorld > General > local lexicon` precedence.
+- Kept the existing Glossary editor, Expert/AI context, terminology diagnostics and non-EN→PL translation paths unchanged.
+- Updated UI and generated metadata to v0.10.26.
+- Added portable Glossary export/import for sharing translator contributions; conflicting proposals merge as alternatives without silently overwriting preferred terms.
+
+## v0.10.25
+
+- Added an inline EN→PL dictionary table beside **Localization status** in the RimWorld Mod profile.
+- Selecting a row shows matching terms; selecting an exact word or phrase in the English cell narrows the table immediately without calling an external API.
+- Expanded the legacy contextual glossary into a layered EN→PL terminology system.
+- Added separate general and RimWorld/mod-specific glossary files with explicit `Mod > RimWorld > General` precedence.
+- Added preferred Polish terms, allowed alternatives/synonyms, forbidden variants, free-form context tags and notes.
+- Preserved compatibility with the v0.10.24 `rimworld-glossary.csv` Source/Target schema; old files are upgraded when saved.
+- Integrated resolved preferred terminology into automatic RimWorld translation while leaving other language pairs unchanged.
+- Added an **Expert / AI** context preview for the selected entry, including preferred terms, alternatives, forbidden variants, context and notes.
+- Added read-only terminology consistency diagnostics for RimWorld Game and RimWorld Mod profiles.
+- Existing translations are never automatically replaced by diagnostics. Applying exact glossary matches requires an explicit confirmation.
+- Updated UI and generated metadata to v0.10.25.
+
 ## v0.10.24
 
 - Fixed target-language coverage statistics after **Update existing translation**.
@@ -945,4 +970,3 @@
 
 ### Notes
 - RimWorld Game v0.5.0 is the first functional stage. DefInjected/Defs scanning, official-translation comparison and update-diff tooling are planned next.
-

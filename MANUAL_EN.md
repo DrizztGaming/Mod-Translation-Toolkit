@@ -195,6 +195,28 @@ The RimWorld Mod scanner now recognizes translatable bare `<li>` values inside `
 ## v0.10.23: technical RulePack entries
 The Toolkit now recognizes `RulePackDef.rulesStrings[]` rules that contain grammar syntax, references and placeholders only. These entries are counted as technical and no longer reduce translation completion percentages. Coverage reports translated, identical, missing, technical and total entries separately. Long keys in the RimWorld Mod grid also expose their full value in a tooltip.
 
+## v0.10.25: EN→PL dictionary and terminology checks
+
+The **Glossary** button in the RimWorld Game and RimWorld Mod profiles now edits two separate data layers: a general dictionary and RimWorld/mod-specific terminology. Conflicts are resolved using **Mod > RimWorld > General** precedence.
+
+The RimWorld Mod profile includes an inline dictionary table beside **Localization status**. Selecting a row shows all matching terms; selecting an exact word or phrase in the **English** column narrows the table to that glossary entry. The preview is local and does not call a paid API.
+
+Each entry supports an English source term, preferred Polish equivalent, allowed alternatives/synonyms, forbidden variants, context and a note. Separate multiple values with `|`.
+
+**Expert / AI** creates a ready-to-copy translation context for the selected row. **Check terminology** reports inconsistent and forbidden variants without changing any text. Applying exact glossary matches to existing labels requires a separate confirmation.
+
+The legacy v0.10.24 `rimworld-glossary.csv` format remains readable and is upgraded when saved.
+
+## v0.10.26: persistent local dictionary panel
+
+The **EN→PL dictionary** panel remains visible to the right of **Localization status**. Select one word or a short phrase in the **English** column to see the preferred Polish equivalent and alternatives as separate results. The panel checks Glossary rules first, then the bundled local lexicon. It does not call an API or require an Internet connection.
+
+A single click only selects a suggestion. Double-click inserts it at the caret in the Polish field currently being edited, or replaces the selected fragment. If no field is actively being edited, an empty translation is filled; existing text is appended to rather than overwritten.
+
+**Add to Glossary** stores the selected pair as a contextual Mod-layer rule. The existing Glossary editor, Expert/AI context and terminology diagnostics remain unchanged.
+
+The Glossary editor also includes **Export for sharing** and **Import from translator**. Export creates a portable CSV file. Import merges received entries without replacing an existing preferred translation; a different proposal is added as an allowed alternative.
+
 ## v0.10.24: correct coverage after translation update
 
 After using **Update existing translation**, target-language coverage is now recalculated from the translation mod that was just loaded. Preserved translations are immediately reflected in the coverage statistics instead of a misleading `0/...` state.
